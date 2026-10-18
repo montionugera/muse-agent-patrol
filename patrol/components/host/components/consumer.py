@@ -121,7 +121,7 @@ class MuseConsumer:
         with self.db.transaction() as c:
             # Recheck inside the write transaction (the earlier read is not
             # an authority or concurrency guarantee).
-            current=c.execute("SELECT status,lease_version FROM wakeup_requests WHERE id=?",
+            current=c.execute("SELECT * FROM wakeup_requests WHERE id=?",
                               (wakeup_id,)).fetchone()
             if (not current or
                     not Wakeups._worker_intent_valid(c,current,generation)):
