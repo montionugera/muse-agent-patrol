@@ -6,6 +6,7 @@ from pathlib import Path
 from patrol.components.host.index import HostHandoff, MuseConsumer
 from patrol.components.persistence.index import Database, StaleLease
 from patrol.components.queue.index import Queue
+from patrol.components.outbox.index import Outbox
 from patrol.components.wakeup.index import Wakeups
 
 
@@ -34,6 +35,121 @@ class AgentLeaseRecoveryTests(unittest.TestCase):
             worker,pack["scheduler_activity_id"],pack["scheduler_generation"],
             pack["work_lease_version"] if work_gen is None else work_gen,
             at,{"observation_seq":seq,"host_session":"hatch-session-1"})
+
+    def test_issue47_recovery_report_distinguishes_started_from_sent(self):
+        work_before=dict(self.db.read("SELECT status,lease_version FROM work_items "
+                                      "WHERE id=?",(self.id,))[0])
+        report=self.muse.recovery_report(self.id,1002)
+        self.assertEqual(report["diagnosis"],
+                         "worker_started_without_verified_remote_effect")
+        self.assertEqual(report["activity"]["id"],
+                         self.started["scheduler_activity_id"])
+        self.assertEqual(report["wakes"][0]["execution_status"],"started")
+        self.assertEqual(report["scheduled_outbox_receipts"],[])
+        self.assertFalse(report["safe_to_force_complete"])
+        self.assertFalse(report["side_effects_executed"])
+        self.assertEqual(dict(self.db.read(
+            "SELECT status,lease_version FROM work_items WHERE id=?",
+            (self.id,))[0]),work_before)
+
+    def test_issue47_recovery_report_uses_only_exact_scheduled_receipts(self):
+        pack=self.started
+        out=Outbox(self.db).stage("issue47:original-message","agent_1",
+                                 "send","chat_owner",
+                                 {"content":"test-only original message"},1002,
+                                 schedule_context={"id":pack["scheduler_activity_id"],
+                                     "owner":"real-agent",
+                                     "generation":pack["scheduler_generation"]})
+        # Test fixture models already verified remote readback, NOT an Agent
+        # shortcut that claims a real platform receipt.
+        with self.db.transaction() as c:
+            c.execute("""UPDATE outbox SET status='confirmed',
+                remote_id='message_fixture_1' WHERE id=?""",(out,))
+        report=self.muse.recovery_report(self.id,1003)
+        self.assertEqual(report["diagnosis"],
+                         "confirmed_remote_effects_local_finish_pending")
+        self.assertEqual(report["scheduled_outbox_receipts"][0]["id"],out)
+        self.assertEqual(report["scheduled_outbox_receipts"][0]["remote_id"],
+                         "message_fixture_1")
+        self.assertFalse(report["safe_to_force_complete"])
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='unknown' WHERE id=?",(out,))
+        unknown=self.muse.recovery_report(self.id,1004)
+        self.assertEqual(unknown["diagnosis"],
+                         "unknown_remote_effect_reconcile_exact_request")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+
+    def test_issue47_exact_confirmed_resume_finishes_without_reposting(self):
+        pack=self.started
+        oid=Outbox(self.db).stage("issue47:reply-exact-once","agent_1",
+                                 "send","chat_owner",{"content":"already replied"},
+                                 1002,schedule_context={
+                                     "id":pack["scheduler_activity_id"],
+                                     "owner":"real-agent",
+                                     "generation":pack["scheduler_generation"]})
+        # Synthetic independent readback in isolated SQLite, not a live
+        # platform statement. Real runtime requires ActionSender confirmation.
+        with self.db.transaction() as c:
+            c.execute("""UPDATE outbox SET status='confirmed',
+                remote_id='message_test_exact' WHERE id=?""",(oid,))
+        yielded=self.muse.scheduler.checkpoint(
+            pack["scheduler_activity_id"],"real-agent",
+            pack["scheduler_generation"],1003,
+            {"phase":"resume original completion only"},voluntary=True)
+        self.assertTrue(yielded["suspended"])
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(self.id,))[0]["status"],
+            "pending")
+        result=self.muse.recover_exact_confirmed(
+            self.ticket["wakeup_id"],self.ticket["notification_generation"],
+            "real-agent",1004)
+        self.assertEqual(result["status"],"finished")
+        self.assertTrue(result["recovered_original_confirmed"])
+        self.assertEqual(result["confirmed_outbox_ids"],[oid])
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(self.id,))[0]["status"],
+            "done")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM schedule_activities WHERE id=?",
+            (pack["scheduler_activity_id"],))[0]["status"],"completed")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM wakeup_execution_receipts WHERE wakeup_id=?",
+            (self.ticket["wakeup_id"],))[0]["status"],"finished")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+        again=self.muse.recover_exact_confirmed(
+            self.ticket["wakeup_id"],self.ticket["notification_generation"],
+            "real-agent",1005)
+        self.assertEqual(again["status"],"already_finished")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+
+    def test_issue47_recovery_rejects_missing_remote_proof_and_wrong_worker(self):
+        pack=self.started
+        oid=Outbox(self.db).stage("issue47:unverified","agent_1",
+                                 "send","chat_owner",{"content":"unknown"},
+                                 1002,schedule_context={
+                                     "id":pack["scheduler_activity_id"],
+                                     "owner":"real-agent",
+                                     "generation":pack["scheduler_generation"]})
+        self.muse.scheduler.checkpoint(
+            pack["scheduler_activity_id"],"real-agent",
+            pack["scheduler_generation"],1003,{"phase":"inspect"},voluntary=True)
+        for worker in ("unknown-agent","real-agent"):
+            result=self.muse.recover_exact_confirmed(
+                self.ticket["wakeup_id"],self.ticket["notification_generation"],
+                worker,1004)
+            self.assertEqual(result["status"],
+                "original_worker_evidence_missing" if worker!="real-agent"
+                else "exact_confirmed_effects_missing")
+            self.assertEqual(self.db.read(
+                "SELECT status FROM work_items WHERE id=?",(self.id,))[0]["status"],
+                "pending")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM outbox WHERE id=?",(oid,))[0]["status"],"prepared")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM schedule_activities WHERE id=?",
+            (pack["scheduler_activity_id"],))[0]["status"],"suspended")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
 
     def test_long_worker_survives_both_120_second_lease_boundaries(self):
         first=self.renew(1090,1)

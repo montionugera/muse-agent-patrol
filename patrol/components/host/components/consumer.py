@@ -5,6 +5,7 @@ must invoke this CLI after wake(), reason over the returned untrusted context,
 and stage actions under the returned Scheduler generation. No Owner per-item
 operator assertion is involved. Remote permission remains ActionSender's job.
 """
+import contextlib
 import json
 from ...persistence.index import canonical, StaleLease
 from ...queue.index import Queue
@@ -182,3 +183,177 @@ class MuseConsumer:
                 "confirmed_outbox_ids":[row["id"] for row in effects],
                 "remote_effects_confirmed":len(effects),
                 "remote_action_issued":False}
+
+    def recover_exact_confirmed(self, wakeup_id, generation, worker, now):
+        """Resume and complete *only* an original verified-confirmed reply.
+
+        Recovery is restricted to the original Worker receipt and the exact
+        Scheduler-linked Outbox rows. It can neither invent Host acceptance
+        nor mark unrelated/unattributed platform messages as this work.
+        A current Host intent and newly granted Scheduler + Queue generations
+        are still required; no leases are resurrected or remotely resent.
+        """
+        if (not isinstance(worker,str) or not 1<=len(worker)<=128
+                or type(generation) is not int or generation<1):
+            raise ValueError("bounded original Worker and wake generation required")
+        with self.db.transaction() as c:
+            original=c.execute("""SELECT * FROM wakeup_requests WHERE id=?""",
+                               (wakeup_id,)).fetchone()
+            if original and original["source_type"]=="work":
+                finished=c.execute("""SELECT x.status,x.worker,x.wakeup_generation,
+                    w.status AS work_status FROM wakeup_execution_receipts x
+                    JOIN work_items w ON w.id=?
+                    WHERE x.wakeup_id=?""",
+                    (original["source_id"],wakeup_id)).fetchone()
+                # Idempotent *read-only* acknowledgement after the first
+                # atomic finish retired a best-effort notification. A caller
+                # cannot complete or alter anything through this shortcut.
+                if (finished and finished["status"]=="finished"
+                        and finished["worker"]==worker
+                        and finished["wakeup_generation"]==generation
+                        and finished["work_status"]=="done"):
+                    return {"status":"already_finished",
+                            "work_id":original["source_id"],
+                            "remote_action_issued":False}
+            wake=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
+            if wake["source_type"]!="work":
+                raise ValueError("only a uniquely linked human_action can be recovered")
+            work=c.execute("SELECT status FROM work_items WHERE id=?",
+                           (wake["source_id"],)).fetchone()
+            if not work:
+                raise StaleLease("original work missing")
+            if work["status"]=="done":
+                return {"status":"already_finished","work_id":wake["source_id"],
+                        "remote_action_issued":False}
+            if work["status"] not in ("pending","retry_wait"):
+                return {"status":"work_not_ready","work_id":wake["source_id"],
+                        "remote_action_issued":False}
+            activity=c.execute("""SELECT id FROM schedule_activities WHERE
+                work_id=?""",(wake["source_id"],)).fetchone()
+            receipt=c.execute("""SELECT worker,status,activity_id,wakeup_generation
+                FROM wakeup_execution_receipts WHERE wakeup_id=?""",
+                (wakeup_id,)).fetchone()
+            if (not activity or not receipt or
+                    receipt["worker"]!=worker or
+                    receipt["activity_id"]!=activity["id"] or
+                    receipt["wakeup_generation"]!=generation or
+                    receipt["status"] not in ("started","progress")):
+                return {"status":"original_worker_evidence_missing",
+                        "work_id":wake["source_id"],"remote_action_issued":False}
+            effects=c.execute("""SELECT o.id,o.status,o.remote_id
+                FROM scheduled_outbox so JOIN outbox o ON o.id=so.outbox_id
+                WHERE so.schedule_id=? ORDER BY so.staged_at,so.outbox_id""",
+                (activity["id"],)).fetchall()
+            # No "read_only" fabrication, no guessed reply text/cursor and
+            # no automatic resend. A confirmed, independently linked remote
+            # ID is the only allowed auto local-finish path here.
+            if not effects or any(
+                    effect["status"]!="confirmed" or not effect["remote_id"]
+                    for effect in effects):
+                return {"status":"exact_confirmed_effects_missing",
+                        "work_id":wake["source_id"],"remote_action_issued":False}
+            exact_ids=[effect["id"] for effect in effects]
+        # The previous Worker started under an older generation. The
+        # resumed slice must attest progress, never forge a new Host start.
+        # Reacquire both leases through normal ranking/Queue public APIs.
+        decision=self.scheduler.dispatch(worker,now,for_work_id=wake["source_id"])
+        if not decision["granted"]:
+            return {"status":"scheduler_deferred",
+                    "scheduler_advice":decision.get("advice"),
+                    "hint_status":decision.get("hint_status"),
+                    "work_id":wake["source_id"],"remote_action_issued":False}
+        activity=decision["activity"]
+        if activity["id"]!=receipt["activity_id"]:
+            raise StaleLease("resumed activity no longer matches original Worker")
+        claimed=self.queue.claim_specific(wake["source_id"],worker,now,
+            {"kind":"accepted_host_wakeup" if wake["host_capability"]=="reliable_ack"
+                     else "best_effort_host_wakeup",
+             "wakeup_id":wakeup_id,"wakeup_generation":generation})
+        self.wakeups.record_execution(wakeup_id,generation,
+            activity["id"],activity["lease_version"],worker,
+            "progress",now,{"recovery":"exact_original_confirmed_effects",
+                            "original_outbox_ids":exact_ids,
+                            "remote_action_issued":False})
+        # Existing MuseConsumer.finish revalidates Host intent, BOTH fresh
+        # Scheduler/Queue generations, original Worker start, and *all*
+        # exact Outbox statuses inside one BEGIN IMMEDIATE transaction.
+        done=self.finish(wakeup_id,generation,worker,
+            activity["id"],activity["lease_version"],
+            claimed["lease_version"],now,
+            {"decision":"original_confirmed_remote_effect",
+             "original_outbox_ids":exact_ids,
+             "reason":"exact Scheduler-linked, independently confirmed remote IDs; no resend"})
+        return {**done,"recovered_original_confirmed":True,
+                "remote_action_issued":False}
+
+    def recovery_report(self, work_id, now):
+        """Inspect evidence for one stalled work item without writing or replaying.
+
+        A platform message cursor, copied text, or historical Host acceptance
+        does not establish an Outbox link. Only scheduled_outbox identities
+        connect effects to an activity; never guess a match by message body.
+        This deliberately does NOT complete work or infer remote delivery.
+        """
+        if not isinstance(work_id,str) or not 1<=len(work_id)<=128:
+            raise ValueError("bounded work ID required")
+        with contextlib.closing(self.db.connect()) as c:
+            c.execute("BEGIN")
+            work=c.execute("""SELECT id,type,status,event_id,lease_owner,
+                lease_version,lease_until,next_action_at FROM work_items
+                WHERE id=?""",(work_id,)).fetchone()
+            if work is None:
+                return {"work_id":work_id,"status":"work_not_found",
+                        "side_effects_executed":False}
+            activity=c.execute("""SELECT id,status,lease_owner,lease_version,
+                lease_until,preempt_requested FROM schedule_activities
+                WHERE work_id=?""",(work_id,)).fetchone()
+            wakes=c.execute("""SELECT w.id,w.status,w.lease_version,
+                w.confirmed_at,n.generation AS notification_generation,
+                x.status AS execution_status,x.worker AS execution_worker,
+                x.activity_id AS execution_activity_id,
+                x.activity_generation AS execution_activity_generation,
+                x.started_at,x.finished_at
+                FROM wakeup_requests w
+                LEFT JOIN host_wakeup_notifications n ON n.wakeup_id=w.id
+                LEFT JOIN wakeup_execution_receipts x ON x.wakeup_id=w.id
+                WHERE w.source_type='work' AND w.source_id=?
+                ORDER BY w.created_at DESC,w.id DESC LIMIT 50""",
+                (work_id,)).fetchall()
+            count=c.execute("""SELECT count(*) AS n FROM wakeup_requests
+                WHERE source_type='work' AND source_id=?""",(work_id,)).fetchone()["n"]
+            effects=(c.execute("""SELECT o.id,o.logical_key,o.status,
+                o.remote_id,o.verify_cursor,
+                so.lease_generation,so.owner FROM scheduled_outbox so
+                JOIN outbox o ON o.id=so.outbox_id
+                WHERE so.schedule_id=? ORDER BY so.staged_at,so.outbox_id""",
+                (activity["id"],)).fetchall() if activity else [])
+            # No union with generic Outbox rows: an unlinked message is not
+            # attributable to this work without independent identity proof.
+        receipts=[dict(row) for row in effects]
+        executed=[dict(row) for row in wakes]
+        statuses={row["status"] for row in receipts}
+        if work["status"]=="done":
+            diagnosis="already_completed"
+        elif "unknown" in statuses:
+            diagnosis="unknown_remote_effect_reconcile_exact_request"
+        elif receipts and statuses=={"confirmed"}:
+            diagnosis="confirmed_remote_effects_local_finish_pending"
+        elif receipts and statuses!={"confirmed"}:
+            diagnosis="outbox_effects_not_all_confirmed"
+        elif any(row["execution_status"] in ("started","progress")
+                 for row in executed):
+            diagnosis="worker_started_without_verified_remote_effect"
+        elif any(row["status"]=="accepted" for row in executed):
+            diagnosis="host_accepted_without_verified_worker_completion"
+        else:
+            diagnosis="no_exact_work_effect_evidence"
+        return {"work_id":work_id,"work":dict(work),
+                "activity":dict(activity) if activity else None,
+                "wakes":executed,"wake_rows_total":count,
+                "wake_rows_truncated":count>len(executed),
+                "scheduled_outbox_receipts":receipts,
+                "diagnosis":diagnosis,
+                "next_step":"obtain a new legitimate Scheduler/Queue lease and original wake/Worker evidence before local finish; reconcile unknown by original request ID; do not stage another remote action without proving its absence",
+                "unlinked_platform_reply_not_proof_of_completion":True,
+                "safe_to_force_complete":False,
+                "side_effects_executed":False}
