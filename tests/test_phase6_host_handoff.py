@@ -116,7 +116,7 @@ class HostHandoffTests(unittest.TestCase):
         self.assertEqual(resumed["source_id"],ident)
 
     def test_hook_script_has_valid_shell_syntax_and_fenced_order(self):
-        source=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
+        source=Path(__file__).resolve().parents[1]/"tools"/"crewquay_hatch_hook.sh"
         script=source.read_text(encoding="utf-8")
         self.assertIn("runtime-cycle",script)
         self.assertLess(script.index("runtime-cycle"),
