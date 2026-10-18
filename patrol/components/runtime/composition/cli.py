@@ -334,13 +334,13 @@ def main(argv=None):
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
             elif args.command in ("deployment-start","deployment-ensure"):
-                # Called by the existing HATCH Hook once per installed SHA.
-                # All subsequent turns use local status and never issue a
-                # capability GET or generate duplicate runs/work.
+                # Agent-owned lifecycle command, never the repeating HATCH
+                # Hook. Ordinary Git SHA upgrades are not new deployment runs.
                 bound=db.read("SELECT value FROM meta WHERE key='actor'")
                 current=Deployment(db).get() if bound else None
                 if (args.command=="deployment-ensure" and current and
-                        current.get("repo_sha")==args.repo_sha):
+                        current.get("status")!="not_started" and
+                        current.get("state") not in ("failed","expired")):
                     result={"status":"already_initialized","deployment":current,
                             "remote_action_issued":False}
                 elif not bound:
