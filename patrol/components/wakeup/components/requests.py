@@ -257,24 +257,34 @@ class Wakeups:
                             "lease_until":leased["lease_until"],"host_called":False}
         return None
 
-    def prepare_best_effort(self, source_id, now, capability_source="hatch-native-wake/v1"):
+    def prepare_best_effort(self, source_id, now, capability_source="hatch-native-wake/v1", source_type="work"):
         """Durably throttle a wake *intention* without consuming the Host ACK lease.
 
         Wake may crash before/after a real call, so the outcome is always
         unknown until the worker starts. No fake accepted Host receipt is made.
         Old unknown delivery rows remain untouched and can be used to resume.
         """
-        if not isinstance(source_id,str) or not source_id or not isinstance(capability_source,str) or not capability_source:
-            raise ValueError("valid host intent source and capability origin required")
+        if (not isinstance(source_id,str) or not source_id or
+                not isinstance(capability_source,str) or not capability_source
+                or source_type not in ("work","social")):
+            raise ValueError("valid host intent source, kind and capability origin required")
         with self.db.transaction() as c:
-            work=c.execute("""SELECT status,next_action_at FROM work_items
-                WHERE id=? AND type='human_action'""",(source_id,)).fetchone()
-            if not work or work["status"] not in ("pending","retry_wait") or work["next_action_at"]>now:
-                return None
+            if source_type=="work":
+                work=c.execute("""SELECT status,next_action_at FROM work_items
+                    WHERE id=? AND type='human_action'""",(source_id,)).fetchone()
+                if not work or work["status"] not in ("pending","retry_wait") or work["next_action_at"]>now:
+                    return None
+            else:
+                social=c.execute("""SELECT 1 FROM schedule_activities a
+                    JOIN social_intents si ON si.activity_id=a.id
+                    WHERE a.id=? AND a.status IN ('ready','suspended')""",
+                    (source_id,)).fetchone()
+                if not social:
+                    return None
             row=c.execute("""SELECT * FROM wakeup_requests
-                WHERE source_type='work' AND source_id=?
+                WHERE source_type=? AND source_id=?
                   AND status IN ('pending','retry_wait','unknown')
-                ORDER BY created_at LIMIT 1""",(source_id,)).fetchone()
+                ORDER BY created_at LIMIT 1""",(source_type,source_id)).fetchone()
             if not row or (row["status"]=="retry_wait" and row["next_attempt_at"]>now):
                 return None
             prev=c.execute("SELECT * FROM host_wakeup_notifications WHERE wakeup_id=?",
@@ -296,7 +306,7 @@ class Wakeups:
                 capability_source=excluded.capability_source,outcome='unknown'""",
                 (row["id"],gen,attempts,now,now+delay,capability_source))
             return {"wakeup_id":row["id"],"source_id":source_id,
-                    "source_type":"work","lease_version":gen,
+                    "source_type":source_type,"lease_version":gen,
                     "notification_generation":gen,"next_notice_at":now+delay,
                     "notification_attempt":attempts,
                     "notification_outcome":"unknown",
@@ -309,7 +319,7 @@ class Wakeups:
     def _worker_intent_valid(c, wake, generation):
         if wake["status"]=="accepted" and wake["lease_version"]==generation:
             return "reliable_ack"
-        if wake["source_type"]!="work" or wake["status"] not in ("pending","retry_wait","unknown"):
+        if wake["source_type"] not in ("work","social") or wake["status"] not in ("pending","retry_wait","unknown"):
             return None
         notice=c.execute("""SELECT generation FROM host_wakeup_notifications
             WHERE wakeup_id=? AND capability='best_effort'""",(wake["id"],)).fetchone()
@@ -564,11 +574,17 @@ class Wakeups:
                 # a successfully started Worker owns a Queue status=running.
                 # Check a nonterminal business source instead of silently
                 # excluding every live-but-stalled best-effort Worker.
-                source=c.execute("""SELECT status FROM work_items
-                    WHERE id=? AND type='human_action'""",
-                    (row["source_id"],)).fetchone()
-                if not source or source["status"] not in ("pending","retry_wait","running"):
-                    continue
+                if row["source_type"]=="social":
+                    source=c.execute("""SELECT status FROM schedule_activities
+                        WHERE id=? AND kind='social'""",(row["source_id"],)).fetchone()
+                    if not source or source["status"] not in ("ready","suspended","running"):
+                        continue
+                else:
+                    source=c.execute("""SELECT status FROM work_items
+                        WHERE id=? AND type='human_action'""",
+                        (row["source_id"],)).fetchone()
+                    if not source or source["status"] not in ("pending","retry_wait","running"):
+                        continue
                 key="wakeup_execution_best_effort:"+row["id"]+":"+str(row["notice_generation"])
                 detail={"wakeup_id":row["id"],"source_id":row["source_id"],
                         "worker":row["observed_worker"],

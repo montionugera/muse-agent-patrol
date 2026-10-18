@@ -33,6 +33,8 @@ class MuseConsumer:
                 or type(generation) is not int or generation<1):
             raise ValueError("stable worker identity and host wakeup generation required")
         wake=self._wake(wakeup_id,generation)
+        if wake["source_type"]=="social":
+            return self._consume_social(wake,wakeup_id,generation,worker,now)
         if wake["source_type"]!="work":
             return {"status":"requires_specialized_consumer",
                     "source_type":wake["source_type"],"remote_action_issued":False}
@@ -103,6 +105,84 @@ class MuseConsumer:
                 "next_step":"reason with the actual Muse model; use fenced stage/outbox-drain and muse-finish",
                 "remote_action_issued":False}
 
+    def _consume_social(self,wake,wakeup_id,generation,worker,now):
+        """A social wake grants *one Agent session*, not an action permission."""
+        actor=self.db.read("SELECT value FROM meta WHERE key='actor'")
+        if not actor:
+            return {"status":"identity_pending","remote_action_issued":False}
+        intent=self.db.read("""SELECT actor_id,resource_type,resource_id,action
+            FROM social_intents WHERE activity_id=?""",(wake["source_id"],))
+        if not intent or intent[0]["actor_id"]!=actor[0]["value"]:
+            return {"status":"social_not_ready","remote_action_issued":False}
+        decision=self.scheduler.dispatch(worker,now,for_activity_id=wake["source_id"])
+        if not decision["granted"]:
+            return {"status":"scheduler_deferred",
+                    "hint_status":decision.get("hint_status"),
+                    "scheduler_advice":decision.get("advice"),
+                    "remote_action_issued":False}
+        activity=decision["activity"]
+        if activity["id"]!=wake["source_id"] or activity["kind"]!="social":
+            raise StaleLease("Host social intent no longer matches Scheduler lease")
+        self.wakeups.record_execution(wakeup_id,generation,activity["id"],
+            activity["lease_version"],worker,"started",now,
+            {"social_activity_id":activity["id"],
+             "host_mode":wake["host_capability"]})
+        return {"status":"started","source_type":"social",
+                "actor":actor[0]["value"],"worker":worker,
+                "wakeup_id":wakeup_id,"wakeup_generation":generation,
+                "host_capability":wake["host_capability"],
+                "host_accepted_verified":wake["host_capability"]=="reliable_ack",
+                "scheduler_activity_id":activity["id"],
+                "scheduler_generation":activity["lease_version"],
+                "work_lease_version":0,
+                "opportunity":{"resource_type":intent[0]["resource_type"],
+                    "resource_id":intent[0]["resource_id"],
+                    "suggested_action":intent[0]["action"],
+                    "content_trust":"untrusted"},
+                "checkpoint":activity["checkpoint"],
+                "authorization":"current Actor Manifest, Owner deny and live resource action approval required",
+                "next_step":"model decides skip or stage exactly one fenced authorized action; muse-finish after confirmed",
+                "remote_action_issued":False}
+
+    def _finish_social(self,wake,wakeup_id,generation,worker,activity_id,
+                       activity_generation,work_lease_version,now,evidence):
+        """Finish social under current Scheduler/Worker fencing in one SQLite transaction."""
+        if work_lease_version!=0:
+            raise ValueError("social execution has no Queue work lease; use version 0")
+        with self.db.transaction() as c:
+            current=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
+            if current["source_type"]!="social" or current["source_id"]!=activity_id:
+                raise StaleLease("Host social intent does not match Scheduler activity")
+            activity=self.scheduler.agent_owned_tx(
+                c,activity_id,worker,activity_generation,now,kind="social")
+            if activity["work_id"] is not None:
+                raise StaleLease("social lease must not own Queue work")
+            intent=c.execute("SELECT 1 FROM social_intents WHERE activity_id=?",
+                             (activity_id,)).fetchone()
+            if intent is None:
+                raise StaleLease("missing admitted social opportunity")
+            self.wakeups.agent_started_tx(
+                c,wakeup_id,generation,worker,activity_id,activity_generation)
+            effects=self.outbox.agent_effects_tx(c,activity_id)
+            if effects:
+                if any(row["status"]!="confirmed" for row in effects):
+                    raise ValueError("social remote action requires confirmed Outbox receipt")
+            elif (evidence.get("decision")!="skipped"
+                  or not isinstance(evidence.get("reason"),str)
+                  or not 1<=len(evidence["reason"].strip())<=500):
+                raise ValueError("unposted social opportunity must be explicitly skipped")
+            self.scheduler.agent_finish_tx(
+                c,activity,worker,activity_generation,now,evidence)
+            self.wakeups.agent_finish_tx(
+                c,wakeup_id,generation,worker,activity_id,activity_generation,
+                now,{"source_type":"social",**evidence},
+                [row["id"] for row in effects],current["host_capability"])
+        return {"status":"finished","source_type":"social",
+                "activity_id":activity_id,
+                "confirmed_outbox_ids":[row["id"] for row in effects],
+                "remote_effects_confirmed":len(effects),
+                "remote_action_issued":False}
+
     def renew_liveness(self, wakeup_id, generation, worker, activity_id,
                        activity_generation, work_lease_version, now, evidence):
         """Renew Queue, Scheduler and Worker heartbeat in ONE SQLite transaction.
@@ -150,6 +230,10 @@ class MuseConsumer:
         if (not isinstance(evidence,dict) or not evidence
                 or len(canonical(evidence).encode("utf-8"))>32768):
             raise ValueError("bounded completion evidence required")
+        prior=self._wake(wakeup_id,generation)
+        if prior["source_type"]=="social":
+            return self._finish_social(prior,wakeup_id,generation,worker,
+                activity_id,activity_generation,work_lease_version,now,evidence)
         with self.db.transaction() as c:
             wake=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
             if wake["source_type"]!="work":

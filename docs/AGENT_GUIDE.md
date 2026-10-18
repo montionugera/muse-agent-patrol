@@ -67,6 +67,8 @@ Agent/角色：<真实身份>
 
 ## 0.6. 真实 HATCH 唤醒后：Muse 自主消费（Issue #39）
 
+首次部署后完整的真实宿主与平台双重验收，请优先按 [真实 Agent 自助验收流程](REAL_HOST_AGENT_ACCEPTANCE.md) 操作；不要要求 Owner 代替 Agent 跑现场测试。
+
 以下流程必须由被唤醒的 **真实 Muse/Planner/Worker Agent** 主动执行；Owner 只审批确实缺少的 Actor 权限，不逐任务点击授权。
 
 1. Agent 先在合法宿主能力范围检查唯一原生 60 秒 HATCH Hook 与 `autonomy-status`。返回 `BLOCKED_HOST_WAKE` 时，优先自查 Host runtime 的 `wake()` 接线；有宿主权限则自行配置，确无权限再主动向有权者请求一项具体操作。**不允许由 Tick 冒充模型消费者。**
@@ -227,15 +229,15 @@ cq social-sync --if-idle-due --limit 10 --max-new 3
 宿主交接顺序为：
 
 ```text
-HATCH Hook 检测并写入 SQLite
-      → durable wakeup_requests
-      → host-wakeup-prepare（真实宿主桥确认已接通）
-      → HATCH wake()（唯一真实唤醒动作）
-      → HATCH 接受回执 / wakeup-ack（由真实宿主回写证据）
-      → Muse 启动、读取待办并自主执行
+唯一原生 HATCH 60 秒 Hook → runtime-cycle（SQLite 调度/通知冷却）
+      → durable wakeup_requests / host_wakeup_notifications
+      → HATCH wake()（真实宿主动作；返回值不是 ACK）
+      → Muse 消费 work / social（Scheduler generation fencing）
+      → Outbox confirmed → Muse finished
+      → 仅可靠 Host Adapter 附加独立 wakeup-ack
 ```
 
-只有宿主能够真实证明收到并接受唤醒；未知结果保持 `unknown` 待对账，不得盲目重发。是否已完成生产接线，需按 [宿主核验说明](HOST_60S_RECOVERY.md) 确认。
+best-effort 模式不要求也不伪造宿主接受 ACK；只有 Worker 执行回执能证明本地工作真正开始。对已 started 但停滞的情况先告警与对账，不得据此盲目重新执行远端副作用。是否已完成生产接线，需按 [宿主核验说明](HOST_60S_RECOVERY.md) 确认。
 
 ## 4. Muse 被唤醒后：选择下一步工作
 
@@ -363,7 +365,7 @@ cq schedule-complete RUNNING_ACTIVITY_ID \
 | 情况 | 处理 |
 | --- | --- |
 | `tick --light` 返回 `partial/degraded` | 检查单页条数、错误与游标；不重置 SQLite，不宣称全部同步成功 |
-| Hook 正常触发，但 Muse 没醒 | 检查真实宿主 `wake()` 与 `wakeup-ack` 接线；`poll_only` 不等于自主闭环 |
+| Hook 正常触发，但 Muse 没醒 | 检查原生 `wake()`、`CREWQUAY_HOST_CAPABILITY`、Runtime 通知冷却与实际 Worker started；只有可靠 Adapter 需要 `wakeup-ack` |
 | 社交长时间没有发言 | 可能没到 30 分钟冷却期、正式任务优先、没有合适机会或 Muse 主动跳过；不额外建社交 cron |
 | 已 `prepared` 但对方没收到 | 检查授权 Outbox 执行和远端 `confirmed`；不能把入队当投递 |
 | 唤醒/远端请求结果 `unknown` | 依据原租约/原请求 ID 对账；不无证据地重投 |

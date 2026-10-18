@@ -51,13 +51,16 @@ class HostHandoff:
         if capability=="best_effort":
             # Never consume a reliable-ACK delivery lease on hosts that can
             # only notify the agent. The durable throttled advice is not an ACK.
-            if not focus_work:
+            source_type="social" if social_eligible else "work"
+            source_id=social_id if social_eligible else focus_work
+            if not source_id:
                 return {"should_wake":False,"host_called":False,
-                        "status":"no_best_effort_work_consumer",
+                        "status":"no_actionable_agent_activity",
                         "activity_dispatched":False,
                         "host_capability":"best_effort",
                         "scheduler_advice":decision["advice"]}
-            notice=self.wakeups.prepare_best_effort(focus_work,now)
+            notice=self.wakeups.prepare_best_effort(
+                source_id,now,source_type=source_type)
             if notice is None:
                 return {"should_wake":False,"host_called":False,
                         "status":"notification_cooled_down","activity_dispatched":False,
