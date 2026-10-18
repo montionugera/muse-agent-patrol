@@ -20,7 +20,7 @@ from patrol.components.executor.index import Authorization
 def opportunity():
     return {"protocolVersion":"1","mode":"read_only_social_discovery",
             "actorId":"muse","modelInvoked":False,"actionExecuted":False,
-            "items":[{"kind":"post","resource":{"type":"post","id":"one"},
+            "items":[{"kind":"post","resource":{"type":"post","id":"post_one"},
                 "suggestedAction":"community.post.comment","contentTrust":"untrusted",
                 "matchedInterests":[],"title":"untrusted","preview":"untrusted"}]}
 
