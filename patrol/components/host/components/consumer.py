@@ -30,6 +30,114 @@ class MuseConsumer:
         with self.db.transaction() as c:
             return self.wakeups.agent_intent_tx(c,wakeup_id,generation)
 
+    def _start_atomic(self,wakeup_id,generation,worker,now,source_type,
+                      source_id,work_id=None,activity_id=None):
+        """Atomic Scheduler grant + optional Queue claim + verified Worker start.
+
+        Registration may be a separate, harmless idempotent step; no running
+        lease exists until this single BEGIN IMMEDIATE commits. Every Host
+        intent, Actor and current promise checkpoint is rechecked *inside* it.
+        A lost response can read back the same live Worker lease/receipt,
+        without making a new claim or creating another remote effect.
+        """
+        self.scheduler.sync_work(now,limit=500,focus_work_id=work_id)
+        with self.db.transaction() as c:
+            wake=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
+            if wake["source_type"]!=source_type or wake["source_id"]!=source_id:
+                raise StaleLease("Host source changed before Worker startup")
+            actor=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
+            if not actor:
+                raise StaleLease("verified Agent Actor required")
+            if source_type=="promise":
+                p=self._promise_for_wake(wake,c)
+                if p["actor"]!=actor["value"] or (
+                    (p["work_type"]=="human_action")!=(work_id is not None)):
+                    raise StaleLease("current Actor/promise work binding changed")
+                if work_id and p["work_item_id"]!=work_id:
+                    raise StaleLease("promise source work changed")
+                if activity_id and activity_id!=c.execute(
+                    """SELECT id FROM schedule_activities WHERE
+                        logical_key=? AND kind='promise'""",
+                    ("promise_due:"+p["id"]+":"+str(p["next_action_at"]),)
+                ).fetchone()["id"]:
+                    raise StaleLease("promise activity checkpoint changed")
+            elif source_type=="social":
+                social=c.execute("""SELECT 1 FROM social_intents
+                    WHERE activity_id=? AND actor_id=?""",
+                    (source_id,actor["value"])).fetchone()
+                if not social or activity_id!=source_id:
+                    raise StaleLease("admitted social opportunity changed")
+            elif source_type!="work" or work_id!=source_id:
+                raise StaleLease("work Host intent changed")
+            if work_id:
+                item=c.execute("""SELECT * FROM work_items WHERE id=?
+                    AND type='human_action'""",(work_id,)).fetchone()
+                if not item:
+                    raise StaleLease("human work no longer exists")
+            prior=c.execute("""SELECT * FROM wakeup_execution_receipts
+                WHERE wakeup_id=?""",(wakeup_id,)).fetchone()
+            if prior:
+                if (prior["worker"]!=worker or
+                        prior["wakeup_generation"]!=generation or
+                        prior["status"] not in ("started","progress")):
+                    raise StaleLease("Worker start belongs to another generation or worker")
+                live=c.execute("""SELECT * FROM schedule_activities
+                    WHERE id=? AND status='running' AND lease_owner=?
+                    AND lease_version=? AND lease_until>?""",
+                    (prior["activity_id"],worker,prior["activity_generation"],now)).fetchone()
+                if live and not live["preempt_requested"] and (
+                    (work_id is not None and live["work_id"]==work_id) or
+                    (work_id is None and live["id"]==activity_id)):
+                    active=self.scheduler._public(live,now)
+                    if work_id:
+                        owned=c.execute("""SELECT * FROM work_items WHERE id=?
+                            AND status='running' AND lease_owner=?
+                            AND lease_until>?""",(work_id,worker,now)).fetchone()
+                        if not owned:
+                            raise StaleLease("Worker startup receipt lost Queue lease")
+                        out=dict(owned)
+                        out["payload"]=json.loads(out["payload"])
+                    else:
+                        out=None
+                    return {"activity":active,"item":out,"already_started":True}
+                # An old Worker receipt is immutable and may represent
+                # unconfirmed remote effects: do not re-stage or assert a
+                # fresh model start for a new Scheduler generation here.
+                return {"deferred":{"hint_status":"existing_worker_requires_recovery",
+                                    "advice":"reconcile original Worker and Outbox evidence"}}
+            decision=self.scheduler.agent_dispatch_tx(
+                c,worker,now,for_work_id=work_id,
+                for_activity_id=activity_id)
+            if not decision["granted"]:
+                return {"deferred":decision}
+            active=decision["activity"]
+            if (work_id and (active["kind"]!="work" or
+                             active["work_id"]!=work_id)) or (
+                not work_id and (active["id"]!=activity_id or
+                                 active["kind"]!=source_type)):
+                raise StaleLease("ranked Scheduler grant mismatches Host source")
+            if work_id:
+                mode=wake["host_capability"]
+                item=self.queue.agent_claim_specific_tx(
+                    c,work_id,worker,now,{
+                        "kind":"accepted_host_wakeup" if mode=="reliable_ack"
+                            else "best_effort_host_wakeup",
+                        "wakeup_id":wakeup_id,
+                        "wakeup_generation":generation})
+                proof={"work_id":work_id,
+                       "work_lease_version":item["lease_version"],
+                       "accepted_host_dispatch":mode=="reliable_ack",
+                       "best_effort_notification":mode=="best_effort"}
+            else:
+                item=None
+                proof={"source_type":source_type,
+                       "source_id":source_id,
+                       "host_mode":wake["host_capability"]}
+            self.wakeups.agent_record_execution_tx(
+                c,wakeup_id,generation,active["id"],active["lease_version"],
+                worker,"started",now,proof)
+            return {"activity":active,"item":item,"already_started":False}
+
     def consume(self, wakeup_id, generation, worker, now):
         if (not isinstance(worker,str) or not 1<=len(worker)<=128
                 or type(generation) is not int or generation<1):
@@ -53,26 +161,17 @@ class MuseConsumer:
         if promise and promise["actor"]!=actor[0]["value"]:
             raise StaleLease("promise is owned by another Actor")
         existing=self.db.read("SELECT status FROM work_items WHERE id=?",(ident,))
-        if not existing or existing[0]["status"] not in ("pending","retry_wait"):
+        if not existing or existing[0]["status"] not in ("pending","retry_wait","running"):
             return {"status":"work_not_ready","work_id":ident,"remote_action_issued":False}
-        decision=self.scheduler.dispatch(worker,now,for_work_id=ident)
-        if not decision["granted"]:
+        started=self._start_atomic(wakeup_id,generation,worker,now,
+            wake["source_type"],wake["source_id"],work_id=ident)
+        if "deferred" in started:
+            decision=started["deferred"]
             return {"status":"scheduler_deferred","scheduler_advice":decision.get("advice"),
                     "hint_status":decision.get("hint_status"),
                     "work_id":ident,"remote_action_issued":False}
-        activity=decision["activity"]
-        if activity["work_id"]!=ident:
-            raise StaleLease("scheduler selected a different work item")
+        activity,item=started["activity"],started["item"]
         mode=wake["host_capability"]
-        item=self.queue.claim_specific(ident,worker,now,
-            {"kind":"accepted_host_wakeup" if mode=="reliable_ack"
-                    else "best_effort_host_wakeup",
-             "wakeup_id":wakeup_id,"wakeup_generation":generation})
-        self.wakeups.record_execution(wakeup_id,generation,activity["id"],
-                                      activity["lease_version"],worker,"started",now,
-                                      {"work_id":ident,"work_lease_version":item["lease_version"],
-                                       "accepted_host_dispatch":mode=="reliable_ack",
-                                       "best_effort_notification":mode=="best_effort"})
         source=None
         if item["event_id"] is not None:
             rows=self.db.read("SELECT source,scope,external_key,payload FROM events WHERE id=?",
@@ -99,7 +198,8 @@ class MuseConsumer:
             "blocked_social_resources":self.config.blocked_social_resources,
             "blocked_social_actions":self.config.blocked_social_actions,
         } if self.config else None)
-        return {"status":"started","work_id":ident,"work_lease_version":item["lease_version"],
+        return {"status":"started","already_started":started["already_started"],
+                "work_id":ident,"work_lease_version":item["lease_version"],
                 "work_payload":item["payload"],"source":source,
                 "actor":actor[0]["value"],"worker":worker,
                 "scheduler_activity_id":activity["id"],
