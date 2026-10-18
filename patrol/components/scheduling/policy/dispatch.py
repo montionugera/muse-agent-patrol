@@ -332,63 +332,81 @@ class Scheduler:
         # Scheduler when a just-awakened worker calls schedule-next.
         refreshed=self.sync_work(now,limit=500,focus_work_id=for_work_id)
         with self.db.transaction() as c:
-            expired=self._recover(c,now)
-            view=self._assess_tx(c,now,True)
-            info={}
-            selected=None
-            if for_work_id is not None:
-                work=c.execute("""SELECT id,type,status,next_action_at,lease_owner,
-                    lease_until FROM work_items WHERE id=?""",
-                    (for_work_id,)).fetchone()
-                if not work or work["type"]!="human_action":
-                    info={"requested_work_id":for_work_id,
-                          "hint_status":"unknown_or_nonhuman_work"}
+            return self.agent_dispatch_tx(c,owner,now,for_work_id=for_work_id,
+                                          for_activity_id=for_activity_id,
+                                          refreshed=refreshed)
+
+    def agent_dispatch_tx(self,c,owner,now,for_work_id=None,for_activity_id=None,
+                          refreshed=0):
+        """Grant only the current highest-ranked activity inside caller transaction.
+
+        Compose this port with Queue and Wakeups ports for an all-or-nothing
+        Host/Muse startup; no external effects or unverified priority override.
+        """
+        if (not isinstance(owner,str) or not 1<=len(owner)<=128
+                or (for_work_id is not None and
+                    (not isinstance(for_work_id,str) or not 1<=len(for_work_id)<=128))
+                or (for_activity_id is not None and
+                    (not isinstance(for_activity_id,str) or not 1<=len(for_activity_id)<=128
+                     or for_work_id is not None))):
+            raise ValueError("bounded Scheduler Worker and exclusive selection guard")
+        expired=self._recover(c,now)
+        view=self._assess_tx(c,now,True)
+        info={}
+        selected=None
+        if for_work_id is not None:
+            work=c.execute("""SELECT id,type,status,next_action_at,lease_owner,
+                lease_until FROM work_items WHERE id=?""",
+                (for_work_id,)).fetchone()
+            if not work or work["type"]!="human_action":
+                info={"requested_work_id":for_work_id,
+                      "hint_status":"unknown_or_nonhuman_work"}
+            else:
+                activity=c.execute("""SELECT * FROM schedule_activities
+                    WHERE work_id=?""",(for_work_id,)).fetchone()
+                if not activity:
+                    reason="activity_not_registered"
+                elif activity["status"] not in ACTIVE:
+                    reason="activity_"+activity["status"]
+                elif work["status"] not in ("pending","retry_wait"):
+                    reason="work_"+work["status"]
+                elif work["next_action_at"]>now:
+                    reason="work_not_due"
                 else:
-                    activity=c.execute("""SELECT * FROM schedule_activities
-                        WHERE work_id=?""",(for_work_id,)).fetchone()
-                    if not activity:
-                        reason="activity_not_registered"
-                    elif activity["status"] not in ACTIVE:
-                        reason="activity_"+activity["status"]
-                    elif work["status"] not in ("pending","retry_wait"):
-                        reason="work_"+work["status"]
-                    elif work["next_action_at"]>now:
-                        reason="work_not_due"
-                    else:
-                        selected=dict(activity)
-                        reason="eligible"
-                    info={"requested_work_id":for_work_id,
-                          "hint_status":reason,
-                          "requested_activity":self._public(activity,now) if activity else None,
-                          "work_status":work["status"],
-                          "work_next_action_at":work["next_action_at"]}
-            if view["running"]:
-                return {**view,**info,"granted":False,
-                        "lease_recovered":expired,"activities_registered":refreshed}
-            best=self._best(self._ready(c,now),now)
-            if best is None or (for_work_id is not None and selected is None):
-                return {**view,**info,"granted":False,
-                        "lease_recovered":expired,"activities_registered":refreshed}
-            if ((for_work_id is not None and selected["id"]!=best["id"])
-                    or (for_activity_id is not None and best["id"]!=for_activity_id)):
-                return {**view,**info,"granted":False,
-                        "hint_status":"outscored_by_other_activity",
-                        "lease_recovered":expired,"activities_registered":refreshed}
-            n=c.execute("""UPDATE schedule_activities SET status='running',
-                lease_owner=?,lease_version=lease_version+1,
-                lease_until=?,slice_until=?,last_started_at=?,
-                last_charged_at=?,preempt_requested=0,preempt_mode=NULL,
-                preempt_reason=NULL,last_updated=?
-                WHERE id=? AND status IN ('ready','suspended')""",
-                (owner,now+self.lease_seconds,now+min(quantum(best["weight"]),self.lease_seconds-1.0),
-                 now,now,now,best["id"])).rowcount
-            if n!=1:
-                raise StaleLease("another scheduler dispatched this activity")
-            active=self._current(c)
-            return {"granted":True,"activity":self._public(active,now),
-                    **info,"lease_recovered":expired,
-                    "activities_registered":refreshed,
-                    "warning":"scheduler lease is not work-claim or CrewQuay authorization"}
+                    selected=dict(activity)
+                    reason="eligible"
+                info={"requested_work_id":for_work_id,
+                      "hint_status":reason,
+                      "requested_activity":self._public(activity,now) if activity else None,
+                      "work_status":work["status"],
+                      "work_next_action_at":work["next_action_at"]}
+        if view["running"]:
+            return {**view,**info,"granted":False,
+                    "lease_recovered":expired,"activities_registered":refreshed}
+        best=self._best(self._ready(c,now),now)
+        if best is None or (for_work_id is not None and selected is None):
+            return {**view,**info,"granted":False,
+                    "lease_recovered":expired,"activities_registered":refreshed}
+        if ((for_work_id is not None and selected["id"]!=best["id"])
+                or (for_activity_id is not None and best["id"]!=for_activity_id)):
+            return {**view,**info,"granted":False,
+                    "hint_status":"outscored_by_other_activity",
+                    "lease_recovered":expired,"activities_registered":refreshed}
+        n=c.execute("""UPDATE schedule_activities SET status='running',
+            lease_owner=?,lease_version=lease_version+1,
+            lease_until=?,slice_until=?,last_started_at=?,
+            last_charged_at=?,preempt_requested=0,preempt_mode=NULL,
+            preempt_reason=NULL,last_updated=?
+            WHERE id=? AND status IN ('ready','suspended')""",
+            (owner,now+self.lease_seconds,now+min(quantum(best["weight"]),self.lease_seconds-1.0),
+             now,now,now,best["id"])).rowcount
+        if n!=1:
+            raise StaleLease("another scheduler dispatched this activity")
+        active=self._current(c)
+        return {"granted":True,"activity":self._public(active,now),
+                **info,"lease_recovered":expired,
+                "activities_registered":refreshed,
+                "warning":"scheduler lease is not work-claim or CrewQuay authorization"}
 
     @staticmethod
     def _owned(c,ident,owner,generation,now):
