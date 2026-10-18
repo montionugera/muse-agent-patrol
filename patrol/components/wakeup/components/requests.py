@@ -210,6 +210,16 @@ class Wakeups:
                 or type(limit) is not int or not 1<=limit<=200):
             raise ValueError("bounded host owner and selection limit required")
         with self.db.transaction() as c:
+            # Retire obsolete intents independently of Scheduler's focused
+            # selection; a finished work must not remain pending forever.
+            candidates=c.execute("""SELECT * FROM wakeup_requests
+                WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?
+                ORDER BY created_at,id LIMIT 100""",(now,)).fetchall()
+            for old in candidates:
+                if not self._source_alive(c,old):
+                    c.execute("""UPDATE wakeup_requests SET status='obsolete',
+                        lease_owner=NULL,lease_until=NULL WHERE id=?
+                        AND status IN ('pending','retry_wait')""",(old["id"],))
             rows=c.execute("""SELECT * FROM wakeup_requests
                 WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?
                   AND (source_type!='social' OR
