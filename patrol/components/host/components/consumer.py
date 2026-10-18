@@ -242,23 +242,20 @@ class MuseConsumer:
             return {"status":"identity_pending","remote_action_issued":False}
         logical="promise_due:"+p["id"]+":"+str(p["next_action_at"])
         rows=self.db.read("""SELECT id FROM schedule_activities
-            WHERE kind='promise' AND logical_key=? AND status IN ('ready','suspended')""",
-            (logical,))
+            WHERE kind='promise' AND logical_key=?
+              AND status IN ('ready','suspended','running')""",(logical,))
         if not rows:
             return {"status":"promise_activity_not_ready",
                     "promise_id":p["id"],"remote_action_issued":False}
-        decision=self.scheduler.dispatch(worker,now,for_activity_id=rows[0]["id"])
-        if not decision["granted"]:
+        started=self._start_atomic(wakeup_id,generation,worker,now,
+            "promise",p["id"],activity_id=rows[0]["id"])
+        if "deferred" in started:
             return {"status":"scheduler_deferred",
-                    "hint_status":decision.get("hint_status"),
+                    "hint_status":started["deferred"].get("hint_status"),
                     "promise_id":p["id"],"remote_action_issued":False}
-        activity=decision["activity"]
-        if activity["kind"]!="promise" or activity["id"]!=rows[0]["id"]:
-            raise StaleLease("promise activity mismatch")
-        self.wakeups.record_execution(wakeup_id,generation,activity["id"],
-            activity["lease_version"],worker,"started",now,
-            {"promise_id":p["id"],"host_mode":wake["host_capability"]})
+        activity=started["activity"]
         return {"status":"started","source_type":"promise",
+                "already_started":started["already_started"],
                 "actor":actor[0]["value"],"worker":worker,
                 "promise":self._public_promise(p),
                 "untrusted_promise_text":p["text"],
@@ -381,20 +378,16 @@ class MuseConsumer:
             FROM social_intents WHERE activity_id=?""",(wake["source_id"],))
         if not intent or intent[0]["actor_id"]!=actor[0]["value"]:
             return {"status":"social_not_ready","remote_action_issued":False}
-        decision=self.scheduler.dispatch(worker,now,for_activity_id=wake["source_id"])
-        if not decision["granted"]:
+        started=self._start_atomic(wakeup_id,generation,worker,now,
+            "social",wake["source_id"],activity_id=wake["source_id"])
+        if "deferred" in started:
             return {"status":"scheduler_deferred",
-                    "hint_status":decision.get("hint_status"),
-                    "scheduler_advice":decision.get("advice"),
+                    "hint_status":started["deferred"].get("hint_status"),
+                    "scheduler_advice":started["deferred"].get("advice"),
                     "remote_action_issued":False}
-        activity=decision["activity"]
-        if activity["id"]!=wake["source_id"] or activity["kind"]!="social":
-            raise StaleLease("Host social intent no longer matches Scheduler lease")
-        self.wakeups.record_execution(wakeup_id,generation,activity["id"],
-            activity["lease_version"],worker,"started",now,
-            {"social_activity_id":activity["id"],
-             "host_mode":wake["host_capability"]})
+        activity=started["activity"]
         return {"status":"started","source_type":"social",
+                "already_started":started["already_started"],
                 "actor":actor[0]["value"],"worker":worker,
                 "wakeup_id":wakeup_id,"wakeup_generation":generation,
                 "host_capability":wake["host_capability"],
