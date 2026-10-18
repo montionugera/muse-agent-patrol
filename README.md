@@ -55,9 +55,9 @@ Agent 按 [Agent 接入指南](docs/AGENT_GUIDE.md) 执行一次完整流程：�
 
 HATCH 唯一 60 秒 Hook 运行 Light Tick / Outbox 补偿；**Tick 只领取 inspect_event**，不会执行模型，也不会误将 human_action 写成 blocked。历史精确匹配的旧版误阻塞项每轮最多修复 100 条，保留同一 SQLite、游标、Outbox 和其他真正拒绝原因。
 
-**部署三次握手验证 ≠ Muse 自主执行 Ready**。先运行 `python3 -m patrol --config <配置> autonomy-status`。没有真实 Host wake 桥时返回 `BLOCKED_HOST_WAKE`；即使设置 `CREWQUAY_HOST_WAKEUP_WIRED=1` 仍需见到真实唤醒接受回执、Muse started/progress/finished 和远端 confirmed。仓库不负责安装原生 HATCH 入口、提供模型或伪造 Host ACK。
+**部署三次握手验证 ≠ Muse 自主执行 Ready**。先运行 `python3 -m patrol --config <配置> autonomy-status`。唯一原生 60 秒 HATCH Hook 仅调用 `runtime-cycle` 获取建议，然后执行真实 `wake()`。仅有 HATCH `wake()` 的宿主使用 `best_effort`（默认）；它不提供可验证 Host ACK，Runtime 持久化通知冷却与 Worker started，不能把 `wake()` 返回值当 accepted。宿主真正实现独立可验证 ACK 契约时才能选择 `reliable_ack`。首次安装、一次性授权、SYN→SYN-ACK→ACK 由 Agent 自主推进，不在每分钟 Hook 里执行。
 
-真实 Host 调用 `wake(..., prepared_json)` **并从 HATCH 接收独立可验的 accepted 凭证**后，使用现有 `wakeup-ack` 落库；被唤醒的真实 Muse Agent（不是 Owner 操作员）运行：
+真实 Host 调用 `wake(..., prepared_json)` 后，真实 Muse Agent（不是 Owner 操作员）使用通知中的 ID 与代次运行；在 `reliable_ack` 模式须由真实 Host Adapter 另行验证并记录 `wakeup-ack`：
 
 ```bash
 python3 -m patrol --config "$CREWQUAY_CONFIG" --db "$CREWQUAY_DB" muse-consume \
@@ -65,7 +65,7 @@ python3 -m patrol --config "$CREWQUAY_CONFIG" --db "$CREWQUAY_DB" muse-consume \
   --worker "$MUSE_WORKER_ID"
 ```
 
-仅在 accepted 且 Actor 已绑定、该工作为 Scheduler 当前最高可执行项时，才获取真实 Queue 与 Scheduler 双租约，并留下 `wakeup-execution started`。Muse 必须自行分析工作，先核实平台正式状态、Actor grants/角色及 Owner 禁止策略。普通聊天中“Owner 让我做”不构成授权。远端动作必须使用返回的 `scheduler_activity_id`、`scheduler_generation`、`worker` 做 `stage` fencing，再通过 Outbox ActionSender 和 exact receipt 获取 `confirmed`。网络 `unknown` 必须原键 GET 对账，绝不可更换 requestId。
+仅在可靠模式已有真实 accepted **或** best-effort 模式有当前持久通知意图，且 Actor 已绑定、工作为 Scheduler 当前最高可执行项时，才获取真实 Queue 与 Scheduler 双租约，并留下独立的 `wakeup-execution started`。Muse 必须自行分析工作，先核实平台正式状态、Actor grants/角色及 Owner 禁止策略。普通聊天中“Owner 让我做”不构成授权。远端动作必须使用返回的 `scheduler_activity_id`、`scheduler_generation`、`worker` 做 `stage` fencing，再通过 Outbox ActionSender 和 exact receipt 获取 `confirmed`。网络 `unknown` 必须原键 GET 对账，绝不可更换 requestId。
 
 当每一条计划内 Outbox 均 `confirmed`（或者真实无写工作有可核查的 `{"decision":"read_only","reason":"..."}` 或 `skipped` 证据）后，Muse 运行 `muse-finish --wakeup-id ... --wakeup-generation ... --worker ... --activity-id ... --activity-generation ... --work-lease-version ... --evidence <JSON文件>`，在一个 SQLite 事务内完成 work、Scheduler 和 wakeup-execution finished；过期租约或 prepared/unknown Outbox 会被拒绝。抢占时沿用 `schedule-checkpoint --yield`，恢复后必须获得新的 generation、记录 progress，再执行。
 
