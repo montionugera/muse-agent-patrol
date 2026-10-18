@@ -87,23 +87,21 @@ else
 fi
 exec 9>&-
 
-# Phase 3's proven 60-second Light Tick + Outbox compensation must keep
-# working even if the new Phase 6 host handoff has not been connected.
-# A mere local Wakeup intent is NOT a host delivery receipt. Never claim a
-# wakeup lease until an operator confirms that the host wake + ack bridge
-# is actually installed and has a verifiable acceptance contract.
-if [[ "${CREWQUAY_HOST_WAKEUP_WIRED:-0}" != "1" ]]; then
-  silent "BLOCKED_HOST_WAKE: host bridge not wired; polling and outbox completed" '{"status":"poll_only","autonomy":"BLOCKED_HOST_WAKE"}'
+# HATCH native wake() is best-effort by default. A configured 'wired' flag
+# never proves Host acceptance. Runtime persists notification intent/cooldown;
+# only an actual Host Adapter can record a reliable acceptance receipt.
+HOST_CAPABILITY="${CREWQUAY_HOST_CAPABILITY:-best_effort}"
+if [[ "$HOST_CAPABILITY" != "best_effort" && "$HOST_CAPABILITY" != "reliable_ack" && "$HOST_CAPABILITY" != "unavailable" ]]; then
+  silent "unsupported Host capability" '{"status":"host_unavailable"}'
   exit 0
 fi
-if ! type wake >/dev/null 2>&1; then
+if [[ "$HOST_CAPABILITY" = "unavailable" ]] || ! type wake >/dev/null 2>&1; then
   silent "host wake function unavailable; no wake lease acquired" '{"status":"host_unavailable"}'
   exit 0
 fi
 
-# The ONLY wake dispatch source is the preexisting durable wakeup_requests.
-# Lease a specific due intent BEFORE calling the external host's wake().
-# No model is started here; the Muse worker separately runs schedule-next.
+# Runtime chooses and cools down the work intent; in best-effort mode it
+# deliberately does NOT acquire a Host ACK lease. Model execution is separate.
 if [ ! -f "$DB" ]; then
   silent "sqlite unavailable" '{"status":"unavailable"}'
   exit 0
@@ -111,7 +109,7 @@ fi
 PREPARED=""
 if ! PREPARED="$(cd "$REPO" && timeout 8s python3 -m patrol \
     --config "$CONFIG" --db "$DB" host-wakeup-prepare \
-    --owner "$HOOK_OWNER" 2>/dev/null)"; then
+    --owner "$HOOK_OWNER" --host-capability "$HOST_CAPABILITY" 2>/dev/null)"; then
   silent "wakeup reservation unavailable" '{"status":"deferred"}'
   exit 0
 fi
@@ -119,19 +117,17 @@ DECISION="$(printf '%s' "$PREPARED" | python3 -c \
   'import json,sys
 d=json.load(sys.stdin)
 print("wake" if d.get("should_wake") is True and
-      d.get("status")=="reserved" and d.get("lease_version") else "silent")' \
+      d.get("status") in ("reserved","notification_intent") and
+      d.get("lease_version") else "silent")' \
   2>/dev/null)" || {
   silent "invalid wakeup handoff" '{"status":"invalid"}'
   exit 0
 }
 if [ "$DECISION" = "wake" ]; then
-  # The host must explicitly acknowledge delivery with wakeup-ack and a
-  # verifiable receipt. Return/exit from wake() is NOT proof of acceptance.
-  # An unacknowledged lease expires to unknown, never blind redelivery.
-  # Host receives the opaque reserved handoff. A real host acceptance
-  # contract must call wakeup-ack, then its Muse Agent calls muse-consume.
-  # This Hook never writes a fictional 'accepted' receipt.
-  wake "CrewQuay Muse work ready: verify host acceptance then run muse-consume with the wakeup_id and lease_version from the handoff; fence all actions and require confirmed Outbox before muse-finish" "$PREPARED"
+  # The Host's return/exit is NOT acceptance evidence. In best-effort
+  # mode the Agent legitimately consumes the notified work using a live
+  # Scheduler+Queue generation; it does not forge a Host ACK.
+  wake "CrewQuay Muse work ready: run muse-consume using wakeup_id and lease_version from this notification; check host_capability, fence all actions and require exact confirmed Outbox before muse-finish" "$PREPARED"
 else
   silent "no due unleased wakeup intent" '{"status":"idle"}'
 fi
