@@ -167,6 +167,26 @@ class GitHubOperations:
             raise ValueError("stable unique logical action key required (8..128)")
         self._authorized(repo,operation)
         route,body=self._build(operation,payload)
+        # Fail BEFORE writing a 'sending' intent if a secret is unavailable
+        # or a read-only authentication check fails. Only the real mutation
+        # requires the durable crash-unknown fence.
+        try:
+            token=read_secret(self.manifest.state_dir,
+                              self.manifest.data["github"]["credential_ref"])
+        except (OSError,ValueError) as e:
+            reason=getattr(e,"reason","SECURE_GITHUB_SECRET_UNAVAILABLE")
+            return {"status":"blocked","reason":reason,
+                    "new_request_sent":False,"remote_effect_confirmed":False}
+        identity,me=self.transport.request("GET","/user",token)
+        access,repository=self.transport.request("GET","/repos/"+repo,token)
+        if (identity!=200 or not isinstance(me,dict) or
+                not isinstance(me.get("login"),str) or
+                access!=200 or not isinstance(repository,dict) or
+                repository.get("full_name","").lower()!=repo.lower()):
+            return {"status":"denied" if identity in (401,403) or
+                    access in (401,403,404) else "preflight_deferred",
+                    "reason":"GITHUB_PREWRITE_AUTH_OR_REPOSITORY_UNVERIFIED",
+                    "new_request_sent":False,"remote_effect_confirmed":False}
         encoded=json.dumps([operation,repo,payload],sort_keys=True,
                            ensure_ascii=False,separators=(",",":"))
         digest=hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -195,35 +215,22 @@ class GitHubOperations:
         remote_id=None
         status=0
         try:
-            token=read_secret(self.manifest.state_dir,
-                              self.manifest.data["github"]["credential_ref"])
-            # Fresh authenticated read proves token identity/repo reachability,
-            # NOT write scope. GitHub itself authorizes each actual mutation.
-            identity,me=self.transport.request("GET","/user",token)
-            access,repository=self.transport.request("GET","/repos/"+repo,token)
-            if (identity!=200 or not isinstance(me,dict) or
-                    not isinstance(me.get("login"),str) or
-                    access!=200 or not isinstance(repository,dict) or
-                    repository.get("full_name","").lower()!=repo.lower()):
-                result="denied" if identity in (401,403) or access in (401,403,404) else "unknown"
-                status=identity or access
+            method="PUT" if operation=="merge_pull" else "POST"
+            status,response=self.transport.request(
+                method,"/repos/"+repo+route,token,body)
+            if status in (200,201) and isinstance(response,dict):
+                path=self._readback_path(operation,payload,response)
+                checked,readback=self.transport.request(
+                    "GET","/repos/"+repo+path,token) if path else (0,None)
+                ok,remote_id=(self._verified(operation,payload,response,readback)
+                              if checked==200 else (False,None))
+                result="confirmed" if ok else "unknown"
+            elif status in (400,401,403,404,422):
+                result="denied"
             else:
-                method="PUT" if operation=="merge_pull" else "POST"
-                status,response=self.transport.request(
-                    method,"/repos/"+repo+route,token,body)
-                if status in (200,201) and isinstance(response,dict):
-                    path=self._readback_path(operation,payload,response)
-                    checked,readback=self.transport.request(
-                        "GET","/repos/"+repo+path,token) if path else (0,None)
-                    ok,remote_id=(self._verified(operation,payload,response,readback)
-                                  if checked==200 else (False,None))
-                    result="confirmed" if ok else "unknown"
-                elif status in (400,401,403,404,422):
-                    result="denied"
-                else:
-                    result="unknown"
+                result="unknown"
         except (ValueError,OSError):
-            result="unknown"  # No request can be safely replayed without evidence.
+            result="unknown"  # Never automatically repost an ambiguous write.
         c=self._open()
         try:
             with c:
