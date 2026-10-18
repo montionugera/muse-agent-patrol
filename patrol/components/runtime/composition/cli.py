@@ -21,6 +21,7 @@ from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
 from ...setup.index import Manifest, Setup
+from ...github.index import GitHubOperations
 from ...scheduling.index import Scheduler
 from ...social.index import SocialOpportunities
 from ...transport.index import Client, credential_provider
@@ -66,6 +67,12 @@ def parser():
     for action in ("skip-optional","deny"):
         command=setup_sub.add_parser(action)
         command.add_argument("--step",required=True)
+    g=sub.add_parser("github-action",help="typed PAT action; never called by native HATCH Hook")
+    g.add_argument("--manifest",required=True)
+    g.add_argument("--repo",required=True)
+    g.add_argument("--operation",required=True,choices=("create_issue","create_branch","create_pull","merge_pull"))
+    g.add_argument("--logical-key",required=True)
+    g.add_argument("--payload-file",required=True)
     sub.add_parser("init")
     sub.add_parser("doctor")
     sub.add_parser("status")
@@ -312,6 +319,16 @@ def main(argv=None):
                 result=setup.deny(args.step)
             print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
             return 0
+        if args.command=="github-action":
+            payload_path=Path(args.payload_file).expanduser()
+            if payload_path.is_symlink() or not payload_path.is_file() or payload_path.stat().st_size>32000:
+                raise ValueError("safe bounded GitHub action payload file required")
+            with payload_path.open(encoding="utf-8") as f:
+                body=json.load(f)
+            result=GitHubOperations(Manifest.load(args.manifest)).action(
+                args.logical_key,args.repo,args.operation,body)
+            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+            return 0 if result["status"]=="confirmed" else 1
         cfg=load_config(args.config,database=args.db)
         if args.command=="runtime-cycle":
             # The coordinator is the parent of phase CLIs, so it must NOT hold
