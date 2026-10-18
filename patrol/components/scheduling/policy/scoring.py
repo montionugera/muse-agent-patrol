@@ -11,11 +11,16 @@ def priority(row, now, *, running=False):
         urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
     ready_since=float(row["ready_since"])
     # The initial aging ramp is bounded to limit short-term thrashing. A
-    # second, slower *unbounded* waiting credit prevents indefinite starvation
-    # when high-base activities keep arriving. Each granted slice resets
-    # ready_since when the worker yields.
+    # second, slower waiting credit prevents indefinite starvation when
+    # high-base activities keep arriving. Both terms cap at 30, so total
+    # aging saturates at 60 after 45 minutes of waiting: enough to close
+    # a moderate base gap, but no single component can outrank every other
+    # score term by orders of magnitude and livelock preemption (issue
+    # #45, where ~6 days of waiting yielded aging ~17000 against a
+    # running slice at 0). Each granted slice resets ready_since when the
+    # worker yields.
     wait=max(0.0,now-ready_since)
-    aging=0.0 if running else min(30.0,wait/90.0)+max(0.0,wait-900.0)/30.0
+    aging=0.0 if running else min(30.0,wait/90.0)+min(30.0,max(0.0,wait-900.0)/30.0)
     fair=min(34.0,max(0.0,float(row["virtual_runtime"])/60.0))
     # Do not thrash on small priority changes. Existing work retains some
     # continuity, while new resumptions pay a measured local restore penalty.
