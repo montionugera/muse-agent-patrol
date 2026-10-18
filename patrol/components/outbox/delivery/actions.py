@@ -10,6 +10,17 @@ class Outbox:
     def __init__(self, db):
         self.db=db
 
+    def agent_effects_tx(self,c,activity_id):
+        """Read exact local remote-receipt status under the Agent transaction.
+
+        This never issues a platform request and never promotes prepared or
+        unknown to confirmed. The Executor owns verification and readback.
+        """
+        return [dict(r) for r in c.execute("""SELECT o.id,o.status,o.remote_id
+            FROM scheduled_outbox so JOIN outbox o ON o.id=so.outbox_id
+            WHERE so.schedule_id=? ORDER BY o.created_at,o.id""",
+            (activity_id,)).fetchall()]
+
     def stage(self, logical, actor, action, target, payload, now, producer_id=None, schedule_context=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
                           "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action",
