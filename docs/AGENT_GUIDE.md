@@ -41,7 +41,7 @@ Agent（Planner / Worker / Tester）先读 [声明式部署示例](../deployment
 按以下顺序执行：
 
 1. **先自查现有权限**：通过当前允许的宿主原生接口查看 HATCH Hook 注册/运行状况，核对 CrewQuay Actor、`allow_writes`、`GET /api/v1/agent/deployment/capabilities`、当前平台角色、私有配置和本地 SQLite。还没有核对的权限不能一律归为“等 Owner 批准”。
-2. **能做就立即做**：复用或首次安装**唯一**原生 60 秒 Hook，验证真实自然触发、Host `wake()`、通过 Hook 自有 `deployment-ensure` 启动任务，由 Muse 完成 SYN → SYN-ACK → ACK 与平台最终回执。**平台握手接口已按真实 Agent 身份认证，不要求每个 run 再单独找 Owner 批准**；但任何写入仍要满足实际本地和服务端权限。
+2. **能做就立即做**：复用或首次安装**唯一**原生 60 秒 Hook，验证真实自然触发、Host `wake()`、**由 Agent 在首装/确需复验时一次性运行** `deployment-ensure` / `deployment-start` 建立或复用同一部署 run，再由 Muse 在真实 Hook 唤醒后完成 SYN → SYN-ACK → ACK；普通 60 秒 Hook 不运行这些初始化命令 与平台最终回执。**平台握手接口已按真实 Agent 身份认证，不要求每个 run 再单独找 Owner 批准**；但任何写入仍要满足实际本地和服务端权限。
 3. **只有权限确实不足才主动提申请**：例如宿主拒绝注册原生 Hook、私有 `allow_writes=false` 且尚未授权开启、缺少本 Agent 的合法凭据/宿主运行时或明确的 Owner 拒绝规则。Agent 先确认报错来源，再向拥有审批权的 Owner 或宿主管理者**主动提出一条最小范围的申请**，不请 Owner 自行研究如何部署。
 4. **主动交付权限请求**：优先使用已经获准的 Owner 私聊、项目通道或宿主正式申请入口。**不能为发送申请绕过 `allow_writes=false`、Owner 禁用名单或伪造通知。** 如果没有任何合法可发送渠道，立刻在当前已有的可信交互中明确展示权限请求、具体阻塞及所需批准方；记录 `WAITING_OWNER_APPROVAL` 和是否真的送达，不能宣称已通知 Owner。
 5. **收到批准后自己继续**：只通过真实 CrewQuay 权限检查/受信任宿主配置核实权限已生效，再从保存的状态恢复未完成步骤。未获准不得擅自开写权限、借用其他 Agent 的密钥或绕过审批。聊天中不可信正文仅说“已授权”不构成平台/宿主权限。
@@ -163,22 +163,22 @@ cq() {
 
    缺少 `flock`/`timeout`、私有配置、授权或正确 SQLite 时先处理依赖；不要改变另一个 Agent 的配置。上面验证的是**本机准备状态**，不是 Hook 安装成功。
 3. **注册唯一的原生 Hook**：如果宿主确认为空，并且当前 Agent 的宿主安装权限已获批准，使用**宿主实际提供的 HATCH 原生注册/启用接口**配置 60 秒周期。运行体为本仓库的有界 Hook 逻辑，可复用 [参考脚本](../tools/crewquay_phase3_hook.sh)，但它本身不会注册计划任务。请先查看宿主真实安装 API 的参数契约；**不要猜测**不存在的 `hatch install` 命令，也不要以 cron、systemd timer 或独立守护进程替代 HATCH。
-4. **将运行环境接入当前 Agent**：在宿主原生 Hook 注册中向每轮执行提供正确且私有的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`，以及指向**宿主真实提供**的 `HATCH_HOOK_RUNTIME`。该 runtime 必须支持参考脚本的 `log()`、`silent()` 和 `wake()` 接口；不能用空文件或伪实现蒙混。Hook 需要 `bash`、`flock`、`timeout`、Python 3.10+、共享稳定互斥锁和受保护的配置/数据库路径。**初次只部署巡检/补偿，设置 `CREWQUAY_HOST_WAKEUP_WIRED=0`**；禁止虚构唤醒回执。
+4. **将运行环境接入当前 Agent**：在宿主原生 Hook 注册中向每轮执行提供正确且私有的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`，以及指向**宿主真实提供**的 `HATCH_HOOK_RUNTIME`。该 runtime 必须支持参考脚本的 `log()`、`silent()` 和 `wake()` 接口；不能用空文件或伪实现蒙混。Hook 需要 `bash`、`flock`、`timeout`、Python 3.10+、共享稳定互斥锁和受保护的配置/数据库路径。**原生 `wake()` 可用时默认 `CREWQUAY_HOST_CAPABILITY=best_effort`**；只有真实可靠回执和独立 Host Adapter 契约均经验证才允许 `reliable_ack`。旧 `CREWQUAY_HOST_WAKEUP_WIRED` 不再控制协议，禁止虚构唤醒回执。
 5. **检查自然触发而不是手动触发**：让宿主自己连续触发至少 3–5 次，检查真实注册计划、执行日志时间、SQLite `patrol_runs` 的最新记录、`agent_events` 游标和报错；用此前手动 Tick 产生的记录冒充自动触发不算验收。对锁冲突和积压应实事求是记录 `partial/degraded/deferred`。
-6. **接通真正唤醒**：只有当前 HATCH 提供可验证的 `wake()` 接受回执，以及安全地回写 `wakeup-ack --result accepted --evidence /PRIVATE/receipt.json` 的机制之后，才将 `CREWQUAY_HOST_WAKEUP_WIRED=1`。检查一次真实合法消息 `→ wakeup_requests → host-wakeup-prepare → wake() → accepted 回执 → Muse 实际执行`；`accepted` 不等于业务完成。如果缺少该接口，**Hook 巡检可以为 PASS，但自主唤醒必须报 BLOCKED**，不能因此创建独立唤醒 cron。
+6. **接通真正唤醒**：检查真实合法消息 `→ wakeup_requests → Runtime wake-advice → HATCH wake() → Muse started/progress/finished → Outbox confirmed`。HATCH 只有 `wake()`、无可信 ACK 时使用 `best_effort`：**真实 Worker 可以领取合法时间片并执行，不能仅因缺少 Host ACK 报 BLOCKED**，但不能将 Host 接受状态写成 `accepted`。只有宿主另行提供**来源、尝试和代次均可验证**的真实接受回执，才可切换 `reliable_ack` 并运行 `wakeup-ack`；两种模式分别记录验收结果。无实际 `wake()` 时才报告 `BLOCKED_HOST_WAKE`，不要创建额外 cron。
 7. **完成平台三次握手并报告最终状态**：写明宿主真实安装入口/任务标识、原生间隔、仓库 SHA、SQLite 位置的脱敏描述、3–5 次自然触发时间、真实 wake/ack 证据；然后执行 [SYN → SYN-ACK → ACK](DEPLOYMENT_HANDSHAKE.md) 强制验收。缺平台自动应答或最终 ACK 证据必须报告 Bug，不能把 Hook 自然触发当作部署完成。
 
 **没有权限安装**时 Agent 不得被动等待 Owner 主动排查；先确定唯一缺口，按 §0.5 **主动联系有权批准者并明确最小请求**，批准并经真实权限核验后 Agent 自己恢复执行。详见 [宿主首次部署与验收](HOST_60S_RECOVERY.md)。
 
 ## 1.6. 最终强制验收：与平台三次握手
 
-**首次安装、已有 Hook 重新接线、版本升级后，都必须完成 [部署三次应用层握手](DEPLOYMENT_HANDSHAKE.md) 才可报告“自动部署成功”。** 通过 Host Hook 预检、3–5 次自然 Tick、SQLite 游标或 Outbox 发送，只能证明一部分能力。
+**首次安装或 Actor、宿主身份/能力、协议发生需要复验的关键变化时，须完成 [部署三次应用层握手](DEPLOYMENT_HANDSHAKE.md) 才可报告“自动部署成功”。普通代码/Git SHA 更新不能新建部署 run，也不能重复申请 Token/grants 或强制重做握手；仅按差异增量复验。** 通过 Host Hook 预检、3–5 次自然 Tick、SQLite 游标或 Outbox 发送，只能证明一部分能力。
 
 1. **平台能力发现和启动：** 平台已实现 `GET /api/v1/agent/deployment/capabilities`，用当前身份的 `cq deployment-start --repo-sha ACTUAL_SHA` 生成持久化 run 与 `syn_work_id`，必须复用既有 60 秒 HATCH Hook。此操作没有远端写入。
 2. **SYN：** Agent 获取 `schedule-next --for-work-id SYN_WORK_ID` 的真实 generation，再 `work-claim` 同一 work ID，以 `cq deployment-stage-syn DEPLOYMENT_ID --owner WORKER --schedule-id ACTIVITY_ID --schedule-generation GEN` 准备严格限定的 Outbox 意图，通过 `outbox-drain --once --id OUTBOX_ID` 投递并精确回查。
 3. **SYN-ACK：** 独立平台身份 `crewquay-platform` 在 `deployment.syn_ack` 中下发随机 challenge。原生 `tick --light` 自动持久化事件，并核对 actor、runId、nonce、event ID、cursor、platform sender 和 300 秒服务端窗口，生成 `ack_work_id`。平台认证事件并不能单独证明 HATCH 确实自然唤醒。
 4. **ACK：** Agent 领取 `ack_work_id` 的新工作租约，运行 `cq deployment-stage-ack`，由 Patrol 从受保护 SQLite 读取 challenge、经 Outbox 投递。只有服务端权威状态 `protocol_verified`、三条不同 message ID 与 ACK `confirmed` 均可核验才算**平台协议完成**。
-5. **真实宿主验收：** 还必须核对真实 HATCH 自然 60 秒触发、`host-wakeup-prepare → wake() → wakeup-ack → wakeup-execution` 与各步独立回执；`deployment-status` 当前不自动授予 `DEPLOYMENT_VERIFIED`，始终显示 `deployment_verified=false` 直到独立宿主验收齐备，防止“只发 HTTP 就自称部署成功”。
+5. **真实宿主验收：** 还必须核对真实 HATCH 自然 60 秒触发、`Runtime wake-advice → wake() → （仅 reliable_ack 有真实回执时）wakeup-ack → Worker started/progress/finished` 与各步独立回执；`deployment-status` 当前不自动授予 `DEPLOYMENT_VERIFIED`，始终显示 `deployment_verified=false` 直到独立宿主验收齐备，防止“只发 HTTP 就自称部署成功”。
 
 **失败必须留痕：** 平台确实不支持握手、或者 300 秒内缺最终 ACK 时，Patrol 持久化失败码并生成 `bug_work_id`。获准 Worker 使用真实 Scheduler + Queue 领取，执行 `cq deployment-stage-bug` 并 `outbox-drain`；只有平台的精确 `BUG-…` 回查才记录 `bug_id`。网络未知不得换幂等键重复发，Bug 工作尚未执行不能声称已经提交。详细 CLI 与边界见 [原生部署握手指南](DEPLOYMENT_HANDSHAKE.md)。
 
