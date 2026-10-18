@@ -1,5 +1,36 @@
 # Agent Setup v1 — one-time, resumable onboarding
 
+## Purpose
+
+Give each independent Muse Agent a versioned, non-secret deployment plan and
+recoverable *one-item-at-a-time* setup process, separate from the 60s Hook.
+
+## Responsibilities
+
+Validate declared expectations without elevating them to grants; verify only
+non-destructive private-credential and repository readback evidence, maintain
+per-Agent setup SQLite state, and provide an explicit next actionable step.
+Persist credential reference and salted fingerprint, never its value.
+
+## Non-responsibilities
+
+No PAT creation, secret import through chat/CLI arguments, CrewQuay permission
+approval, Host Hook registration, Worker-model invocation, scheduler activity
+dispatch, remote business mutation, fabricated Host ACK or platform confirmed.
+
+## Public boundary
+
+`from patrol.components.setup.index import Manifest, Setup` and
+`python3 -m patrol setup --manifest /PRIVATE/deployment.json init|next|resume|verify|status`.
+This API returns advisory status only, not authority to act as Owner.
+
+## Allowed dependencies
+
+Python standard library; `components/config` for read-only existing Runtime
+configuration checks. State persistence is isolated from business SQLite;
+runtime CLI invokes Setup outside its ordinary Tick lock, and Setup does not
+import the scheduler, executor, Host Adapter or CrewQuay mutation clients.
+
 **Ownership:** The real Muse Agent calls this component. The native 60-second HATCH Hook never calls Setup or asks the Owner for anything. Setup lives in its own `components/setup` responsibility root; it does not replace the existing, strictly validated `config.example.json`.
 
 ## Manifest / contract (English)
