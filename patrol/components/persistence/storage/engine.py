@@ -260,6 +260,19 @@ class Database:
                 finished_at REAL,evidence TEXT NOT NULL)""")
             c.execute("""CREATE INDEX IF NOT EXISTS wakeup_execution_due
                 ON wakeup_execution_receipts(status,updated_at)""")
+            # An unacknowledged HATCH wake is a best-effort notification, not a
+            # delivery lease or accepted Host receipt. Keep this ledger separate
+            # from historical wakeup_requests, including leased/unknown rows.
+            c.execute("""CREATE TABLE IF NOT EXISTS host_wakeup_notifications(
+                wakeup_id TEXT PRIMARY KEY REFERENCES wakeup_requests(id),
+                generation INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                intent_at REAL NOT NULL,
+                next_notice_at REAL NOT NULL,
+                capability TEXT NOT NULL CHECK(capability='best_effort'),
+                capability_source TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome='unknown'),
+                worker_started_at REAL)""")
             c.execute("INSERT INTO meta(key,value) VALUES('schema_version','2') "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         if os.name == "posix":
