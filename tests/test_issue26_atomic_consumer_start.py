@@ -105,8 +105,8 @@ class AtomicConsumerStartTests(unittest.TestCase):
         self.assertTrue(pack["already_started"])
         self.assertEqual(pack["status"],"started")
         self.assertEqual(self.counts(work_id),before)
-        with self.assertRaises(StaleLease):
-            self.muse.consume(ticket["wakeup_id"],gen,"different-worker",1004)
+        self.assertEqual(self.muse.consume(ticket["wakeup_id"],gen,
+            "different-worker",1004)["status"],"scheduler_deferred")
         self.assertEqual(self.counts(work_id),before)
 
     def test_social_receipt_fault_rolls_back_social_grant(self):
