@@ -162,7 +162,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIsNone(self.deploy.get(missing["id"])["bug_id"])
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox WHERE action='deployment_bug'")[0]["n"],1)
 
-    def test_hatch_ensure_reuses_same_sha_and_bootstraps_upgrade(self):
+    def test_agent_ensure_preserves_identity_across_ordinary_sha_upgrade(self):
         conf=Path(self.db.path).parent/"enabled.json"
         conf.write_text(json.dumps({"database":str(self.db.path),
                                     "allow_writes":True}),encoding="utf-8")
@@ -193,13 +193,15 @@ class DeploymentTests(unittest.TestCase):
                        "--repo-sha","abcdef0123456789"])
         self.assertEqual(code,0,out.getvalue())
         result=json.loads(out.getvalue())
-        self.assertEqual(result["repo_sha"],"abcdef0123456789")
-        self.assertEqual(Capabilities.requested,
-                         ["/api/v1/agent/deployment/capabilities"])
+        self.assertEqual(result["status"],"already_initialized")
+        self.assertEqual(result["deployment"]["id"],self.run["id"])
+        self.assertEqual(result["deployment"]["repo_sha"],"cac7688e")
+        self.assertEqual(Capabilities.requested,[])
         old=self.db.read("SELECT state,failure_code FROM deployment_runs WHERE id=?",
                          (self.run["id"],))[0]
-        self.assertEqual(old["failure_code"],"SUPERSEDED_BY_UPGRADE")
-        self.assertEqual(old["state"],"failed")
+        self.assertEqual(old["state"],"awaiting_syn")
+        self.assertIsNone(old["failure_code"])
+        self.assertEqual(self.db.read("SELECT count(*) n FROM deployment_runs")[0]["n"],1)
 
     def test_restart_idempotent_and_actor_isolation(self):
         again=self.deploy.start(1002,"cac7688e")
