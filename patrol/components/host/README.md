@@ -19,12 +19,16 @@ replacement scheduler, additional timer, or second wakeup queue.
 - `runtime-cycle` owns scheduling, notification advice, Outbox compensation
   and idle discovery. The native Hook calls exactly that CLI and, if advised,
   the real Host `wake()`. Agent-owned deployment is not in this Hook.
-- Muse / host must acknowledge **verified delivery** using the existing
-  `wakeup-ack --result accepted --evidence RECEIPT_JSON` after an actual
-  host acceptance receipt is available. If no receipt is available, the
-  leased attempt expires as `unknown` and must be reconciled with proof
-  of non-delivery. It is not silently retried or marked accepted.
-- After real host acceptance, the worker records `wakeup-execution` receipts for verified start/progress/finish (see wakeup component contract). Missing or stalled receipts generate persistent alerts on the original 60-second Tick but **never** automatically replay an accepted wake. These receipts do not prove successful remote side effects.
+- **Only reliable Host adapters** acknowledge actual verified acceptance via
+  `wakeup-ack --result accepted --evidence RECEIPT_JSON`. If a reliable
+  delivery lease expires without receipt, it becomes `unknown`, never a
+  guessed `accepted` or automatically replayed delivery. Native best-effort
+  `wake()` does not use this ACK or consume an ACK-gated delivery lease.
+- After a genuine best-effort wake **or** independently accepted reliable
+  handoff, the real Worker writes its separate started/progress/finished
+  receipt. The original Tick audits missing/stalled observations without
+  automatically replaying Host intents or remote Outbox effects. Neither
+  Host acceptance nor Worker started proves remote business completion.
 - Once awake, the real Muse worker uses existing `schedule-next`,
   `work-claim` (where appropriate), `schedule-assess`,
   `schedule-checkpoint`, `schedule-complete` and generation-fenced

@@ -33,7 +33,9 @@ The existing Hook performs idle social discovery by default, without
 requires an already verified Agent identity, checks pending work/promises,
 and uses a durable 30-minute cadence for a **read-only** GET.
 `host-wakeup-prepare` includes eligible social wakeups by default using
-the same durable Host Wakeup lease, with no second periodic service.
+the same durable Wakeup intent table. With native best-effort wake it records
+a throttled notification, **not** an ACK-gated delivery lease; verified
+reliable Host adapters may reserve a delivery lease. No second timer exists.
 Sending community actions still requires the existing global
 `allow_writes=true` authority and exact CrewQuay catalog/resource checks.
 Existing `--include-social` is accepted only for CLI compatibility.
@@ -49,7 +51,7 @@ Light / Full ticks report malformed collector pages as `degraded` with structure
 
 `stage --producer-id WORKER --dispatch-now` records an immutable authorized action first, releases `.tick.lock`, then runs a bounded separate `python -m patrol ... outbox-drain --once --id ACTION_ID` process. It does not grant the Muse worker platform authority and never sends an action from Light Tick. The Executor must GET and verify the CrewQuay actor and check target scope, ACK/read preconditions, exact remote readback and existing idempotency. `outbox-drain --once --lane chat|notifications|any --limit 3` is an independent bounded consumer, not another scanning scheduler. A Hook can invoke `--lane any` to compensate **all** due, authorized Outbox types without expanding any project/action grant; Full Tick remains a recovery path until its separate responsibilities have a verified replacement.
 
-The runtime does not install background services or external job schedules. The recommended existing external Host Hook cadence is **60 seconds**, not the legacy 10-minute Full Tick period. The Hook runs Light Tick + Outbox compensation + SQLite-throttled idle social discovery even when the new host bridge is absent. Its `host-wakeup-prepare` step is gated by `CREWQUAY_HOST_WAKEUP_WIRED=1` after real Host receipt wiring. The `host-wakeup-prepare --owner HOST` command uses `host.index.HostHandoff` to reconcile scheduler hints and lease a due existing Wakeup request atomically. It never calls the host or grants a Scheduler time slice; `wakeup-ack` still requires evidence from the actual host. Never treat a Hook reservation as delivery.
+The runtime does not install background services or external job schedules. The **single native HATCH 60-second Hook** runs one bounded `runtime-cycle`, which internally composes Light Tick, Outbox compensation, SQLite-throttled social discovery, Scheduler and Host wake advice. The Hook then calls the **actual** host `wake()` only when advised; it does not run those component CLIs serially, initiate deployment/authorization or manufacture acknowledgements. For `best_effort`, the Runtime writes only a bounded notice with no reliable delivery lease or fabricated acceptance. `reliable_ack` requires a separately verifiable real Host receipt before `wakeup-ack accepted`; `unavailable` means no real Host wake path. `HostHandoff.prepare` returns routing advice, never invokes a model or grants a Scheduler time slice. Plain SHA upgrades do not trigger a new handshake; Agent-owned initial Setup and platform SYN/ACK are separate from each Hook tick.
 
 ## Phase 6.1 cooperative scheduler
 
