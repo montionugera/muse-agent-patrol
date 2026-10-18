@@ -90,6 +90,25 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(third["host_deployment_verified"])
         self.assertEqual(self.setup.status()["status"],"ready_for_external_e2e")
 
+    def test_verify_does_not_mass_prompt_or_consume_future_one_step_request(self):
+        self.setup.init()
+        for step in ("crewquay_identity","github_credential"):
+            self.probes.overrides[step]=observation(
+                "awaiting_user","SECURE_SECRET_INPUT_REQUIRED",
+                "request_one_secure_credential_import")
+        report=self.setup.verify()
+        self.assertFalse(report["owner_contact_required"])
+        self.assertFalse(any(x["prompt_new"] for x in report["observations"]))
+        self.assertTrue(all(x["asked_at"] is None for x in self.setup.status()["steps"]))
+        first=self.setup.next()
+        self.assertEqual(first["current"]["step"],"crewquay_identity")
+        self.assertTrue(first["owner_contact_required"])
+        self.probes.overrides["crewquay_identity"]=observation(
+            "verified","SIGNED_GRANT_FIXTURE")
+        second=self.setup.next()
+        self.assertEqual(second["current"]["step"],"github_credential")
+        self.assertTrue(second["owner_contact_required"])
+
     def test_optional_skip_cannot_bypass_required(self):
         self.setup.init()
         with self.assertRaises(ValueError):
