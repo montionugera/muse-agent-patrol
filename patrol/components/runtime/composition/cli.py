@@ -30,6 +30,7 @@ from ..process.lock import instance_lock
 from .scheduler import Tick
 from .cycle import RuntimeCycle
 from .latency import LatencyReport
+from .event_backlog import read_only_backlog_report
 
 
 def timestamp(value):
@@ -79,6 +80,9 @@ def parser():
     sub.add_parser("status")
     latency=sub.add_parser("latency-report")
     latency.add_argument("--limit",type=int,default=100)
+    backlog=sub.add_parser("event-backlog-report",
+                           help="read-only census of persisted events and work")
+    backlog.add_argument("--limit",type=int,default=1000)
     sub.add_parser("platform-catalog")
     sub.add_parser("platform-auth-sync")
     a=sub.add_parser("platform-auth-bootstrap")
@@ -356,6 +360,12 @@ def main(argv=None):
             print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
             # Degraded compensation must not suppress a valid urgent Host wake
             # advice; the native Hook can inspect independent phase failures.
+            return 0
+        if args.command=="event-backlog-report":
+            # Open the original SQLite as mode=ro: no migrations, Hook lock,
+            # Worker lease, event cursor changes or Outbox operations.
+            result=read_only_backlog_report(cfg.database,time.time(),args.limit)
+            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
             return 0
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
