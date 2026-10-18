@@ -30,6 +30,23 @@
 5. 原生 `wake()` 可以在 `best_effort` 模式通知 Agent，Runtime 冷却不消耗可靠 ACK 租约；由真正 Worker 合法领取本地 Scheduler/Queue 租约，远端必须精确确认。只有真实可信 Host 接受回执才能单独验收 `reliable_ack`。
 6. 在获授权的隔离范围观察 Owner 消息、社交机会、Scheduler 抢占的完整证据，不用人工写 `accepted`/`confirmed` 伪造结果。
 
+## #68 统一 Hook ABI、Agent 自助升级和漂移核验
+
+**所有 Agent 都执行一个源文件**：`$CREWQUAY_REPO/tools/crewquay_hatch_hook.sh`（标记 `MUSE_HATCH_HOOK_ABI=1`），并继续通过**本 Agent**的 `CREWQUAY_CONFIG` / `CREWQUAY_DB` / `HATCH_HOOK_RUNTIME` 与宿主 `wake()`。单台宿主可有多个不同 Actor，但每个 Agent 的 DB、原生注册和稳定锁必须隔离；默认互斥锁为 `$CREWQUAY_DB.hatch-hook.lock`，而非共享 `$HOME/hooks/state/...`。
+
+Agent **优先将当前唯一 HATCH 原生任务执行命令指向仓库内脚本**，这样正常 `git pull` 更新同一份代码，不再复制出可分叉的 Hook 内容。**这只改执行体，不增加计划任务**；是否能调整现有宿主原生注册，必须由 HATCH 真正接口与当前授权决定，不得臆造跨主机安装命令。若现有 HATCH 任务运行的是已复制的旧 Bash 文件，Agent 先用宿主原生管理接口确认唯一注册和文件路径，再使用下面两个文件操作命令（它们不触碰原生任务定义）：
+
+```bash
+python3 tools/hatch_hook_manager.py audit --installed /ABSOLUTE/PATH/TO/EXISTING_HOOK.sh
+# 由 audit 的 current_sha256 填到下行，作为防并发覆盖的 compare-and-swap 条件
+python3 tools/hatch_hook_manager.py sync --installed /ABSOLUTE/PATH/TO/EXISTING_HOOK.sh --expected-sha CURRENT_SHA256
+python3 tools/hatch_hook_manager.py audit --installed /ABSOLUTE/PATH/TO/EXISTING_HOOK.sh
+```
+
+`audit` 只比较本地标准执行体哈希、旧复制文件是否可识别；它**不证明宿主已注册、真实自然触发、Host/Worker 开始执行**。`sync` 只能更新一个已经存在、可识别且未并发变化的普通脚本文件；以原 SHA 命名在同目录留 `0600` 权限备份，原位原子替换，不创建/删除 Cron/HATCH 计划、不会执行 Hook/读取密钥、不复制其他 Agent SQLite。不认识的自定义脚本、软链接或文件权限不安全时拒绝覆盖，交由该宿主 Agent 核对 HATCH 的实际调用方式和所有权。
+
+Hook 的 Bash 运行时至少需 `log()`、`silent()`，而 `wake()` 决定 `best_effort` 是否可用；缺少 `wake()` 则报告 `unavailable`。标准 Runtime Handoff 校验完整的 `wakeup_id`、代次、类型、模式和与真实 Host 能力一致的交接记录；`wake()` 返回值**不自动表示 received/accepted**。安装/升级后 Agent 必须在原生 HATCH 任务中观察 **3–5 次自然 60 秒触发**，核对同一个 SQLite 中的实际 Tick run、真实 `wake()` 和相同 ID 的 Worker `started/finished`。权限不够则由 Agent 主动按既有正式授权渠道申请并保留现场证据，不能请求 Owner 代为写 Hook；普通代码更新不重做 SYN/ACK、也不清空 Outbox。
+
 ## 单一 Hook 的职责和频率
 
 ```text
