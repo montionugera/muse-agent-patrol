@@ -15,7 +15,6 @@ class NotificationRoutingTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.db = Database(Path(directory.name) / "events.sqlite3")
-        self.addCleanup(self.db.close)
         with self.db.transaction() as c:
             c.execute("INSERT INTO meta(key,value) VALUES('actor','muse')")
         self.now = 1000
