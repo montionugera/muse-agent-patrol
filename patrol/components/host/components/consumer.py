@@ -1,4 +1,4 @@
-"""Model-facing Muse consumer of a *verified* HATCH wake acceptance.
+"""Model-facing Muse consumer of reliable Host receipt OR best-effort intent.
 
 There is deliberately no model API in this module: a real HATCH-hosted Muse
 must invoke this CLI after wake(), reason over the returned untrusted context,
@@ -22,10 +22,12 @@ class MuseConsumer:
         self.wakeups=Wakeups(db,lease_seconds)
 
     def _wake(self, wakeup_id, generation):
-        rows=self.db.read("SELECT * FROM wakeup_requests WHERE id=?",(wakeup_id,))
-        if not rows or rows[0]["status"]!="accepted" or rows[0]["lease_version"]!=generation:
-            raise StaleLease("Muse requires a real accepted wakeup at the current generation")
-        return rows[0]
+        with self.db.transaction() as c:
+            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(wakeup_id,)).fetchone()
+            mode=Wakeups._worker_intent_valid(c,wake,generation) if wake else None
+            if not mode:
+                raise StaleLease("Muse needs a current reliable receipt or best-effort intent")
+            return {**dict(wake),"host_capability":mode}
 
     def consume(self, wakeup_id, generation, worker, now):
         if (not isinstance(worker,str) or not 1<=len(worker)<=128
@@ -50,13 +52,16 @@ class MuseConsumer:
         activity=decision["activity"]
         if activity["work_id"]!=ident:
             raise StaleLease("scheduler selected a different work item")
+        mode=wake["host_capability"]
         item=self.queue.claim_specific(ident,worker,now,
-            {"kind":"accepted_host_wakeup","wakeup_id":wakeup_id,
-             "wakeup_generation":generation})
+            {"kind":"accepted_host_wakeup" if mode=="reliable_ack"
+                    else "best_effort_host_wakeup",
+             "wakeup_id":wakeup_id,"wakeup_generation":generation})
         self.wakeups.record_execution(wakeup_id,generation,activity["id"],
                                       activity["lease_version"],worker,"started",now,
                                       {"work_id":ident,"work_lease_version":item["lease_version"],
-                                       "accepted_host_dispatch":True})
+                                       "accepted_host_dispatch":mode=="reliable_ack",
+                                       "best_effort_notification":mode=="best_effort"})
         source=None
         if item["event_id"] is not None:
             rows=self.db.read("SELECT source,scope,external_key,payload FROM events WHERE id=?",
@@ -89,6 +94,8 @@ class MuseConsumer:
                 "scheduler_activity_id":activity["id"],
                 "scheduler_generation":activity["lease_version"],
                 "wakeup_id":wakeup_id,"wakeup_generation":generation,
+                "host_capability":mode,
+                "host_accepted_verified":mode=="reliable_ack",
                 "checkpoint":activity["checkpoint"],
                 "cached_actor_authority_planning_only":snapshot,
                 "local_owner_policy":local_policy,
@@ -116,9 +123,9 @@ class MuseConsumer:
             # an authority or concurrency guarantee).
             current=c.execute("SELECT status,lease_version FROM wakeup_requests WHERE id=?",
                               (wakeup_id,)).fetchone()
-            if (not current or current["status"]!="accepted"
-                    or current["lease_version"]!=generation):
-                raise StaleLease("accepted wake was revoked or superseded")
+            if (not current or
+                    not Wakeups._worker_intent_valid(c,current,generation)):
+                raise StaleLease("Host receipt or notification intent was superseded")
             a=self.scheduler._owned(c,activity_id,worker,activity_generation,now)
             if a["work_id"]!=wake["source_id"] or a["kind"]!="work":
                 raise StaleLease("scheduler lease is for a different work item")
@@ -161,6 +168,12 @@ class MuseConsumer:
                 canonical({"work_id":wake["source_id"],
                            "confirmed_outbox_ids":[e["id"] for e in effects],
                            "decision":evidence.get("decision")}),wakeup_id))
+            if wake["host_capability"]=="best_effort":
+                # Completion retires the original business intent, never
+                # turns a best-effort notification into Host accepted.
+                c.execute("""UPDATE wakeup_requests SET status='obsolete'
+                    WHERE id=? AND status IN ('pending','retry_wait','unknown')""",
+                    (wakeup_id,))
         return {"status":"finished","work_id":wake["source_id"],
                 "confirmed_outbox_ids":[e["id"] for e in effects],
                 "remote_effects_confirmed":len(effects),"remote_action_issued":False}
