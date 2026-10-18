@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fantasywinter207/muse-agent-patrol/blob/main/deployment.schema.json",
+  "title": "Muse agent declarative deployment manifest v1",
+  "description": "Expectations only: never secrets, grants or confirmed execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent",
+    "crewquay",
+    "github",
+    "runtime"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "host_instance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{1,63}$"
+        },
+        "role": {
+          "enum": [
+            "planner",
+            "worker",
+            "tester"
+          ]
+        },
+        "host_instance": {
+          "type": "string",
+          "minLength": 2
+        }
+      }
+    },
+    "crewquay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "actor_id",
+        "credential_ref",
+        "required_scopes",
+        "required"
+      ],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 2
+        },
+        "credential_ref": {
+          "type": "string",
+          "pattern": "^secret://crewquay/"
+        },
+        "required_scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auth_type",
+        "credential_ref",
+        "repositories",
+        "permissions",
+        "policy",
+        "required"
+      ],
+      "properties": {
+        "auth_type": {
+          "enum": [
+            "fine_grained_pat",
+            "github_app"
+          ]
+        },
+        "credential_ref": {
+          "type": "string",
+          "pattern": "^secret://github/"
+        },
+        "repositories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[^/]+/[^/]+$"
+          }
+        },
+        "permissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "contents": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "issues": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "pull_requests": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "actions": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "workflows": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            }
+          }
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "allow_pr_create",
+            "allow_pr_merge",
+            "allow_direct_main_push"
+          ],
+          "properties": {
+            "allow_pr_create": {
+              "type": "boolean"
+            },
+            "allow_pr_merge": {
+              "type": "boolean"
+            },
+            "allow_direct_main_push": {
+              "const": false
+            }
+          }
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_dir",
+        "config_path",
+        "database",
+        "hook",
+        "required"
+      ],
+      "properties": {
+        "state_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "interval_seconds"
+          ],
+          "properties": {
+            "provider": {
+              "const": "hatch"
+            },
+            "interval_seconds": {
+              "const": 60
+            }
+          }
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
