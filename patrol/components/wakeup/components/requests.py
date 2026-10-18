@@ -199,7 +199,8 @@ class Wakeups:
                     "host_called":False}
 
     def claim_next(self, owner, now, limit=100, allow_social=False,
-                   social_activity_id=None, focus_work_id=None):
+                   social_activity_id=None, focus_work_id=None,
+                   focus_promise_id=None):
         """Atomically reserve the highest-priority due host signal.
 
         Unlike export -> claim, selection and lease acquisition happen inside
@@ -207,8 +208,9 @@ class Wakeups:
         dispatch. This does not call the host or assert delivery.
         """
         if (not isinstance(owner,str) or not 1<=len(owner)<=128
-                or type(limit) is not int or not 1<=limit<=200):
-            raise ValueError("bounded host owner and selection limit required")
+                or type(limit) is not int or not 1<=limit<=200
+                or (focus_work_id is not None and focus_promise_id is not None)):
+            raise ValueError("bounded host owner and exclusive selection required")
         with self.db.transaction() as c:
             # Retire obsolete intents independently of Scheduler's focused
             # selection; a finished work must not remain pending forever.
@@ -225,9 +227,10 @@ class Wakeups:
                   AND (source_type!='social' OR
                        (? AND source_id=?))
                   AND (? IS NULL OR (source_type='work' AND source_id=?))
+                  AND (? IS NULL OR (source_type='promise' AND source_id=?))
                 ORDER BY priority DESC,created_at,id LIMIT ?""",
                 (now,1 if allow_social else 0,social_activity_id or "",
-                 focus_work_id,focus_work_id,limit)).fetchall()
+                 focus_work_id,focus_work_id,focus_promise_id,focus_promise_id,limit)).fetchall()
             for row in rows:
                 if not self._source_alive(c,row):
                     c.execute("""UPDATE wakeup_requests SET status='obsolete',
@@ -266,7 +269,7 @@ class Wakeups:
         """
         if (not isinstance(source_id,str) or not source_id or
                 not isinstance(capability_source,str) or not capability_source
-                or source_type not in ("work","social")):
+                or source_type not in ("work","social","promise")):
             raise ValueError("valid host intent source, kind and capability origin required")
         with self.db.transaction() as c:
             if source_type=="work":
@@ -274,12 +277,19 @@ class Wakeups:
                     WHERE id=? AND type='human_action'""",(source_id,)).fetchone()
                 if not work or work["status"] not in ("pending","retry_wait") or work["next_action_at"]>now:
                     return None
-            else:
+            elif source_type=="social":
                 social=c.execute("""SELECT 1 FROM schedule_activities a
                     JOIN social_intents si ON si.activity_id=a.id
                     WHERE a.id=? AND a.status IN ('ready','suspended')""",
                     (source_id,)).fetchone()
                 if not social:
+                    return None
+            else:
+                promise=c.execute("""SELECT id FROM promises WHERE id=? AND status!='done'
+                    AND (next_action_at<=? OR (first_action_at IS NULL AND start_by<=?)
+                         OR (due_at IS NOT NULL AND due_at<=?))""",
+                    (source_id,now,now,now)).fetchone()
+                if not promise:
                     return None
             row=c.execute("""SELECT * FROM wakeup_requests
                 WHERE source_type=? AND source_id=?
@@ -287,6 +297,12 @@ class Wakeups:
                 ORDER BY created_at LIMIT 1""",(source_type,source_id)).fetchone()
             if not row or (row["status"]=="retry_wait" and row["next_attempt_at"]>now):
                 return None
+            if source_type=="promise":
+                existing=c.execute("SELECT next_action_at FROM promises WHERE id=?",
+                                   (source_id,)).fetchone()
+                expected="promise:"+source_id+":"+str(existing["next_action_at"])
+                if row["logical_key"]!=expected:
+                    return None
             prev=c.execute("SELECT * FROM host_wakeup_notifications WHERE wakeup_id=?",
                            (row["id"],)).fetchone()
             if prev and (prev["next_notice_at"]>now or prev["worker_started_at"] is not None):
@@ -319,7 +335,7 @@ class Wakeups:
     def _worker_intent_valid(c, wake, generation):
         if wake["status"]=="accepted" and wake["lease_version"]==generation:
             return "reliable_ack"
-        if wake["source_type"] not in ("work","social") or wake["status"] not in ("pending","retry_wait","unknown"):
+        if wake["source_type"] not in ("work","social","promise") or wake["status"] not in ("pending","retry_wait","unknown"):
             return None
         notice=c.execute("""SELECT generation FROM host_wakeup_notifications
             WHERE wakeup_id=? AND capability='best_effort'""",(wake["id"],)).fetchone()
@@ -574,7 +590,12 @@ class Wakeups:
                 # a successfully started Worker owns a Queue status=running.
                 # Check a nonterminal business source instead of silently
                 # excluding every live-but-stalled best-effort Worker.
-                if row["source_type"]=="social":
+                if row["source_type"]=="promise":
+                    source=c.execute("""SELECT status FROM promises
+                        WHERE id=?""",(row["source_id"],)).fetchone()
+                    if not source or source["status"]=="done":
+                        continue
+                elif row["source_type"]=="social":
                     source=c.execute("""SELECT status FROM schedule_activities
                         WHERE id=? AND kind='social'""",(row["source_id"],)).fetchone()
                     if not source or source["status"] not in ("ready","suspended","running"):

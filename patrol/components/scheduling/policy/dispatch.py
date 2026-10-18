@@ -438,6 +438,22 @@ class Scheduler:
         if n!=1:
             raise StaleLease("Scheduler Agent completion lost generation")
 
+    def agent_suspend_tx(self,c,row,owner,generation,now,checkpoint):
+        """Release the current promise session without calling it completed."""
+        self.agent_owned_tx(c,row["id"],owner,generation,now,
+                            kind=row["kind"],work_id=row["work_id"])
+        self._charge(c,row,now)
+        n=c.execute("""UPDATE schedule_activities SET status='suspended',
+            checkpoint=?,lease_owner=NULL,lease_until=NULL,slice_until=NULL,
+            lease_version=lease_version+1,preempt_requested=0,preempt_mode=NULL,
+            preempt_reason='promise progress; next step due later',
+            ready_since=?,last_updated=?,resume_after=0
+            WHERE id=? AND status='running' AND lease_owner=?
+            AND lease_version=?""",
+            (canonical(checkpoint),now,now,row["id"],owner,generation)).rowcount
+        if n!=1:
+            raise StaleLease("promise checkpoint lost Scheduler generation")
+
     def checkpoint(self,ident,owner,generation,now,data,*,voluntary=False):
         if (not isinstance(data,dict) or not data or
                 len(canonical(data).encode("utf-8"))>32768):

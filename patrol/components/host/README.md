@@ -44,6 +44,49 @@ implicitly authorizes a Muse model. Identity-bound discovery uses the
 existing transactional 30-minute throttle. Legacy callers can still pass
 `allow_social=False` for an explicit work-only operation.
 
+## Promise handoff (#58)
+
+A due `promise` wake, including one backed by a `human_action` work item,
+uses its **original** `promise:<id>:<next_action_at>` identity. The Hook
+prepares the bounded wake intention; only the real Muse Worker calls
+`muse-consume`, obtains its current Scheduler (and, for human work, Queue)
+generation, and decides the next step. A native best-effort wake is **not**
+Host acceptance. With `reliable_ack`, a real accepted receipt is necessary.
+
+An Agent's execution is **not** a completion just because it was woken,
+claimed a lease, sent a heartbeat or chose `read_only`/`skipped`.
+For a real intermediate step, save a file with evidence such as:
+
+```json
+{"decision":"promise_progress","proof":{"kind":"artifact","reference":"artifact://example"}}
+```
+
+Then invoke `muse-promise-progress --wakeup-id ID --wakeup-generation N
+--worker WORKER --activity-id ACTIVITY --activity-generation N
+--work-lease-version N --evidence /private/evidence.json
+--next-action-at FUTURE_UTC`. The next action is limited to 15 minutes;
+the same SQLite transaction records progress, releases all owned leases,
+finishes the Worker session receipt and leaves the promise **open**.
+A non-human promise uses `--work-lease-version 0`. Fresh Host intent,
+activity and generations are needed at the next due step.
+
+To close a promise, invoke `muse-finish` with
+`{"decision":"promise_done","proof":{"kind":"artifact","reference":"artifact://example"}}`
+or with separately confirmed exact linked Outbox remote IDs. Pending or
+unknown Outbox effects make both progress and completion fail closed.
+Artifact/observation references are Worker-submitted evidence, **not
+independently certified remote delivery**; only a confirmed Outbox remote ID
+proves that category of remote effect. Closure of the promise, linked work,
+Scheduler and Worker receipt is transactional; plain work `muse-finish`
+cannot accidentally close an outstanding promise.
+
+`promise-progress` / `promise-complete` remain legacy ledger APIs;
+the new Host-Worker promise path must use the fenced `muse-*` commands,
+not those ledger APIs as a substitute for a started Worker.
+
+Production acceptance requires natural HATCH wake, actual Muse execution,
+and current platform receipts; local fixtures are not that evidence.
+
 ## Safe recovery inspection for previously answered work (#47)
 
 Before replaying any wake, claiming a stale work lease, or attempting a new

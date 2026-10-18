@@ -9,6 +9,7 @@ from ...wakeup.index import Wakeups
 
 class HostHandoff:
     def __init__(self, db, lease_seconds=120):
+        self.db=db
         self.scheduler=Scheduler(db,lease_seconds)
         self.wakeups=Wakeups(db,lease_seconds)
 
@@ -48,11 +49,53 @@ class HostHandoff:
         focus_work=(decision["candidate"]["work_id"]
                     if decision["candidate"] and
                        decision["candidate"]["kind"]=="work" else None)
+        # Prefer the matching promise wake for both linked human work
+        # and independent promise activities. Never mislabel it as cooldown.
+        focus_promise=None
+        candidate=decision["candidate"]
+        if candidate and candidate["kind"]=="promise":
+            rows=self.db.read("""SELECT p.id FROM promises p
+                WHERE p.status!='done'
+                  AND ('promise_due:'||p.id||':'||CAST(p.next_action_at AS TEXT))=?
+                LIMIT 1""",(candidate["logical_key"],))
+            focus_promise=rows[0]["id"] if rows else None
+        elif focus_work:
+            rows=self.db.read("""SELECT id FROM promises WHERE work_item_id=?
+                AND status!='done' ORDER BY created_at LIMIT 1""",(focus_work,))
+            focus_promise=rows[0]["id"] if rows else None
+        if candidate and (candidate["kind"]=="promise"
+                          or (focus_work and focus_promise)):
+            if not focus_promise:
+                return {"should_wake":False,"host_called":False,
+                        "status":"promise_source_missing",
+                        "activity_dispatched":False}
+            due=self.db.read("""SELECT id FROM promises WHERE id=? AND status!='done'
+                AND (next_action_at<=? OR
+                    (first_action_at IS NULL AND start_by<=?) OR
+                    (due_at IS NOT NULL AND due_at<=?))""",
+                (focus_promise,now,now,now))
+            if not due:
+                return {"should_wake":False,"host_called":False,
+                        "status":"promise_not_due",
+                        "activity_dispatched":False}
+            signal=self.db.read("""SELECT w.id FROM wakeup_requests w
+                JOIN promises p ON p.id=w.source_id
+                WHERE w.source_type='promise' AND w.source_id=?
+                  AND w.logical_key=('promise:'||p.id||':'||
+                      CAST(p.next_action_at AS TEXT))
+                  AND w.status IN ('pending','retry_wait','unknown','leased','accepted')
+                LIMIT 1""",(focus_promise,))
+            if not signal:
+                return {"should_wake":False,"host_called":False,
+                        "status":"promise_signal_missing",
+                        "activity_dispatched":False}
         if capability=="best_effort":
             # Never consume a reliable-ACK delivery lease on hosts that can
             # only notify the agent. The durable throttled advice is not an ACK.
-            source_type="social" if social_eligible else "work"
-            source_id=social_id if social_eligible else focus_work
+            source_type=("social" if social_eligible else
+                         "promise" if focus_promise else "work")
+            source_id=(social_id if social_eligible else
+                       focus_promise if focus_promise else focus_work)
             if not source_id:
                 return {"should_wake":False,"host_called":False,
                         "status":"no_actionable_agent_activity",
@@ -72,7 +115,9 @@ class HostHandoff:
                     "candidate_activity_id":decision["candidate"]["id"]}
         leased=self.wakeups.claim_next(
             owner,now,allow_social=social_eligible,
-            social_activity_id=social_id,focus_work_id=focus_work)
+            social_activity_id=social_id,
+            focus_work_id=None if focus_promise else focus_work,
+            focus_promise_id=focus_promise)
         if leased is None:
             return {"should_wake":False,"host_called":False,
                     "status":"idle","activity_dispatched":False,
