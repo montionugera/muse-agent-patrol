@@ -15,6 +15,16 @@ from ...transport.index import BudgetExceeded, AuthError, connect_ready
 from ...wakeup.index import Wakeups
 
 
+# Metadata-only events retain their durable inspector records, not model work.
+# Grant changes invalidate cached authority in Sync.page and never grant access.
+NO_DECISION_AGENT_EVENTS = frozenset((
+    "chat.read", "room.read", "community.read",
+    "leaderboard.updated",
+    "grants.changed", "capabilities.changed",
+    "authorization.decided", "authorization.revoked",
+))
+
+
 class Tick(ActionSender):
     def __init__(self, db, config, client=None, clock=time.time, monotonic=time.monotonic, ws_factory=None):
         super().__init__(db,config,client,clock)
@@ -77,7 +87,31 @@ class Tick(ActionSender):
                         # Normalized message, receipt and inspector are
                         # durably persisted in the exact source page txn.
                         evidence["kind"]="server_authorized_message_staged"
+                    elif kind in NO_DECISION_AGENT_EVENTS:
+                        # These events can update projections, but require no
+                        # independent Agent action or second Host wake.
+                        evidence["kind"]="agent_event_no_decision_required"
                     else:
+                        # Repeated task-ready pointers for one task can share
+                        # an unstarted decision while it remains pending. Do
+                        # not merge messages, new types or running work.
+                        resource=value.get("resourceId")
+                        if kind=="task.ready" and isinstance(resource,str) and resource.startswith("tsk_"):
+                            prior=self.db.read("""SELECT w.id FROM work_items w
+                                JOIN events e ON e.id=w.event_id
+                                WHERE w.type='human_action' AND w.status='pending'
+                                  AND e.source='agent_events'
+                                  AND e.observed_at>=?
+                                  AND json_extract(e.payload,'$.type')='task.ready'
+                                  AND json_extract(e.payload,'$.resourceId')=?
+                                ORDER BY w.created_at DESC LIMIT 1""",
+                                (now-300,resource))
+                            if prior:
+                                evidence["kind"]="agent_event_coalesced_pending_task_ready"
+                                evidence["coalesced_into_work_id"]=prior[0]["id"]
+                                self.queue.finish(item,self.clock(),evidence=evidence)
+                                done+=1
+                                continue
                         created=event_time(value.get("createdAt"),0)
                         fresh=created>0 and now-self.config.max_event_age_seconds<=created<=now+self.config.future_skew_seconds
                         # Generic events become Muse-decision work. Server
