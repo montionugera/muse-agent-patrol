@@ -109,6 +109,25 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(second["current"]["step"],"github_credential")
         self.assertTrue(second["owner_contact_required"])
 
+    def test_scoped_manifest_edit_retains_unrelated_permission_prompt(self):
+        self.setup.init()
+        self.probes.overrides["crewquay_identity"]=observation(
+            "awaiting_user","SECURE_SECRET_INPUT_REQUIRED",
+            "request_one_secure_crewquay_credential_import")
+        prior=self.setup.next()
+        self.assertTrue(prior["owner_contact_required"])
+        data=fixture(self.root)
+        data["github"]["permissions"]["issues"]="write"
+        revised=Manifest(data)
+        restarted=Setup(revised,probes=self.probes,clock=lambda:1060)
+        saved={x["step"]:x for x in restarted.status()["steps"]}
+        self.assertEqual(saved["crewquay_identity"]["status"],"awaiting_user")
+        self.assertIsNotNone(saved["crewquay_identity"]["asked_at"])
+        self.assertEqual(saved["github_permissions"]["status"],"not_checked")
+        again=restarted.next()
+        self.assertEqual(again["current"]["step"],"crewquay_identity")
+        self.assertFalse(again["owner_contact_required"])
+
     def test_optional_skip_cannot_bypass_required(self):
         self.setup.init()
         with self.assertRaises(ValueError):
