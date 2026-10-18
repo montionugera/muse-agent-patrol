@@ -729,6 +729,66 @@ class PreemptiveSchedulerTests(unittest.TestCase):
             "SELECT status FROM work_items WHERE id=?",(stale,))[0]["status"],
             "pending")
 
+    def test_issue57_voluntary_maintenance_yield_allows_real_work(self):
+        # A high-priority maintenance placeholder previously won every
+        # dispatch after --yield, even with valid human work waiting.
+        maint=self.add("authmanifest-cutover","maintenance",now=1000,score=100)
+        work=Queue(self.db).enqueue("issue57:owner-work","human_action",
+                                   {"reason":"real work"},1000,priority=45)
+        first=self.scheduler.dispatch("worker",1000)["activity"]
+        self.assertEqual(first["id"],maint)
+        parked=self.scheduler.checkpoint(maint,"worker",
+            first["lease_version"],1001,{"phase":"no actual work to perform"},
+            voluntary=True)
+        self.assertTrue(parked["suspended"])
+        self.assertEqual(parked["activity"]["voluntary_yield_streak"],1)
+        self.assertEqual(parked["activity"]["resume_after"],1061)
+        resumed=self.scheduler.dispatch("worker",1002)
+        self.assertTrue(resumed["granted"],resumed)
+        self.assertEqual(resumed["activity"]["work_id"],work)
+        item=Queue(self.db).claim_specific(work,"worker",1003,
+                                          {"approved_by":"Owner"})
+        self.assertEqual(item["scheduler_activity_id"],resumed["activity"]["id"])
+
+    def test_issue57_repeated_voluntary_maintenance_yield_has_durable_backoff(self):
+        maint=self.add("idle-maintenance","maintenance",now=1000,score=100)
+        first=self.scheduler.dispatch("worker",1000)["activity"]
+        for i,(at,delay) in enumerate(((1001,60),(1062,120),(1183,240),(1424,480)),1):
+            paused=self.scheduler.checkpoint(maint,"worker",
+                first["lease_version"],at,{"phase":"still idle"},voluntary=True)
+            self.assertEqual(paused["activity"]["voluntary_yield_streak"],i)
+            self.assertEqual(paused["activity"]["resume_after"],at+delay)
+            self.assertIsNone(self.scheduler.assess(at+1)["candidate"])
+            # Reopening the same SQLite DB must retain the deferral.
+            reopened=Scheduler(Database(self.db.path),lease_seconds=120)
+            self.assertIsNone(reopened.assess(at+1)["candidate"])
+            granted=reopened.dispatch("worker",at+delay)
+            self.assertTrue(granted["granted"],granted)
+            first=granted["activity"]
+            self.assertEqual(first["id"],maint)
+
+    def test_issue57_preempted_maintenance_resumes_without_cooldown(self):
+        maint=self.add("real-maintenance","maintenance",now=1000,score=45)
+        first=self.scheduler.dispatch("worker",1000)["activity"]
+        urgent=self.add("urgent-owner-research","research",now=1001,score=95)
+        advice=self.scheduler.reconcile(1001)["decision"]
+        self.assertEqual(advice["candidate"]["id"],urgent)
+        self.assertTrue(advice["running"]["preempt_requested"])
+        paused=self.scheduler.checkpoint(maint,"worker",
+            first["lease_version"],1002,{"phase":"resume after interrupt"})
+        self.assertTrue(paused["suspended"])
+        self.assertEqual(paused["activity"]["voluntary_yield_streak"],0)
+        self.assertEqual(paused["activity"]["resume_after"],0)
+        critical=self.scheduler.dispatch("worker",1003)["activity"]
+        self.assertEqual(critical["id"],urgent)
+        self.scheduler.complete(critical["id"],"worker",
+                                critical["lease_version"],1004,
+                                {"decision":"read_only","reason":"verified"})
+        after=self.scheduler.dispatch("worker",1005)
+        self.assertTrue(after["granted"],after)
+        self.assertEqual(after["activity"]["id"],maint)
+        self.assertIsNotNone(after["activity"]["checkpoint"])
+
     def test_issue45_same_priority_aged_backlog_claim_survives_reconcile(self):
         # Three equal-priority six-day-old tasks were repeatedly granted then
         # instantly preempted by another equally old task before work-claim.

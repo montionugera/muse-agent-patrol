@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS schedule_activities(
  weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 100),
  deadline REAL, switch_cost INTEGER NOT NULL CHECK(switch_cost BETWEEN 0 AND 30),
  created_at REAL NOT NULL,ready_since REAL NOT NULL,last_updated REAL NOT NULL,
+ -- A voluntary maintenance yield defers only its own next selection; an
+ -- actual safe-point preemption remains resumable without artificial delay.
+ resume_after REAL NOT NULL DEFAULT 0,
+ voluntary_yield_streak INTEGER NOT NULL DEFAULT 0,
  last_started_at REAL,last_charged_at REAL,
  cpu_seconds REAL NOT NULL DEFAULT 0,virtual_runtime REAL NOT NULL DEFAULT 0,
  lease_owner TEXT,lease_version INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +250,16 @@ class Database:
                 except BaseException:
                     c.rollback()
                     raise
+            # Additive, idempotent migration for existing per-Agent SQLite DBs.
+            # Never clear legacy activities or their generation/Outbox identity.
+            schedule_cols={col["name"] for col in
+                c.execute("PRAGMA table_info(schedule_activities)")}
+            if "resume_after" not in schedule_cols:
+                c.execute("ALTER TABLE schedule_activities "
+                          "ADD COLUMN resume_after REAL NOT NULL DEFAULT 0")
+            if "voluntary_yield_streak" not in schedule_cols:
+                c.execute("ALTER TABLE schedule_activities "
+                          "ADD COLUMN voluntary_yield_streak INTEGER NOT NULL DEFAULT 0")
             # Execution receipts are deliberately separate from host delivery
             # leases. Create only AFTER the older wakeup-table rebuild, so
             # v1 -> v2 migration does not drop a referenced parent table.

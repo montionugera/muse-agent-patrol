@@ -26,10 +26,11 @@ class Scheduler:
             """SELECT a.* FROM schedule_activities a
                LEFT JOIN work_items w ON w.id=a.work_id
                WHERE a.status IN ('ready','suspended')
+                 AND a.resume_after<=?
                  AND (a.work_id IS NULL OR (
                       w.status IN ('pending','retry_wait')
                       AND w.next_action_at<=?))
-               ORDER BY a.created_at,a.id""",(now,))]
+               ORDER BY a.created_at,a.id""",(now,now,))]
 
     @staticmethod
     def _current(c):
@@ -40,10 +41,8 @@ class Scheduler:
     def _best(rows, now):
         if not rows:
             return None
-        # The bounded 60-point waiting bonus must not make a stale
-        # priority-45 job outrank a newly arrived priority-85 Owner message.
-        # Within a moderate intrinsic-priority band, however, age/virtual
-        # runtime still decide ordering, so old similar-priority work lives.
+        # Bounded historical waiting credit cannot eclipse a truly urgent
+        # Owner action. Similar intrinsic priorities retain aging fairness.
         highest=max(intrinsic_priority(row,now) for row in rows)
         eligible=(row for row in rows
                   if intrinsic_priority(row,now)>=highest-24)
@@ -58,7 +57,8 @@ class Scheduler:
             "id","logical_key","kind","work_id","status","base_priority",
             "weight","deadline","lease_owner","lease_version","lease_until",
             "slice_until","preempt_requested","preempt_mode","preempt_reason",
-            "cpu_seconds","virtual_runtime","created_at","ready_since","last_updated"
+            "cpu_seconds","virtual_runtime","created_at","ready_since","last_updated",
+            "resume_after","voluntary_yield_streak"
         )}
         result["score"]=priority(row,now,running=row["status"]=="running")
         result["checkpoint"]=json.loads(row["checkpoint"]) if row["checkpoint"] else None
@@ -448,6 +448,17 @@ class Scheduler:
             # Re-evaluate at the actual safe point. A withdrawn or completed
             # challenger must not force an obsolete yield.
             suspended=bool(voluntary or mode)
+            # Yield means resumable, not disabled. However, repeatedly
+            # yielding a high-base maintenance slot without completing it
+            # otherwise starves actual work. Only an explicit voluntary
+            # maintenance yield receives a bounded, growing re-entry delay;
+            # scheduler-requested safe-point preemption is immediately
+            # resumable. Persist the streak across grants and restarts.
+            maintenance_yield=bool(voluntary and row["kind"]=="maintenance")
+            streak=(min(8,int(row["voluntary_yield_streak"])+1)
+                    if maintenance_yield else 0)
+            resume_after=(now+min(3600.0,60.0*2**(streak-1))
+                          if maintenance_yield else 0.0)
             if suspended:
                 if row["work_id"]:
                     # Release only the work lease owned by this scheduler
@@ -467,11 +478,13 @@ class Scheduler:
                     lease_until=NULL,slice_until=NULL,
                     lease_version=lease_version+1,
                     preempt_requested=0,preempt_mode=NULL,
-                    preempt_reason=?,ready_since=?,last_updated=?
+                    preempt_reason=?,ready_since=?,last_updated=?,
+                    resume_after=?,voluntary_yield_streak=?
                     WHERE id=?""",
-                    (canonical(data),"voluntary yield" if voluntary else
+                    (canonical(data),"voluntary maintenance yield; deferred"
+                     if maintenance_yield else "voluntary yield" if voluntary else
                      row["preempt_mode"] or mode or "safe-point yield",
-                     now,now,ident))
+                     now,now,resume_after,streak,ident))
             else:
                 # Renewing a lease must not silently extend an unfinished
                 # fairness slice, even if checkpoints are very frequent.
