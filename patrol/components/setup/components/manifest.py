@@ -139,6 +139,38 @@ class Manifest:
         with p.open(encoding="utf-8") as f:
             return cls(json.load(f,object_pairs_hook=_object_pairs))
 
+    def step_revision(self,step):
+        """Hash only fields capable of changing this item's authorization.
+
+        A GitHub permissions edit must not silently reopen an unrelated
+        CrewQuay approval, reset a Host handshake, or repeat Owner prompts.
+        """
+        a=self.data["agent"]
+        c=self.data["crewquay"]
+        g=self.data["github"]
+        r=self.data["runtime"]
+        identity=(a["id"],a["host_instance"])
+        mapping={
+          "runtime_paths":[identity,r,c["base_url"],c["actor_id"]],
+          "crewquay_identity":[identity,c["base_url"],c["actor_id"],
+                                c["credential_ref"],r["config_path"],r["database"]],
+          "crewquay_scopes":[identity,c["actor_id"],c["required_scopes"],
+                             c["credential_ref"],c["required"]],
+          "github_credential":[identity,g["auth_type"],g["credential_ref"],g["required"]],
+          "github_repositories":[identity,g["auth_type"],g["credential_ref"],
+                                  g["repositories"],g["required"]],
+          "github_permissions":[identity,a["role"],g["repositories"],g["permissions"],
+                                 g["policy"],g["required"]],
+          "native_hatch":[identity,r["hook"],r["state_dir"]],
+          "deployment_handshake":[identity,c["actor_id"],c["base_url"],
+                                   r["hook"],c["required"]]
+        }
+        if step not in mapping:
+            raise ValueError("unknown Setup item revision")
+        return hashlib.sha256(json.dumps(
+            mapping[step],sort_keys=True,separators=(",",":"),
+            ensure_ascii=False).encode()).hexdigest()
+
     def required(self,name):
         return self.data[name]["required"]
 
