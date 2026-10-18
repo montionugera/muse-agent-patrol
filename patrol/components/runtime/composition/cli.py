@@ -181,6 +181,9 @@ def parser():
     a.add_argument("--work-lease-version",type=int,required=True)
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("host-wakeup-prepare")
+    a.add_argument("--host-capability",choices=("best_effort","reliable_ack","unavailable"),
+                   default="reliable_ack",
+                   help="actual Host adapter contract; HATCH wake alone is best_effort")
     # Legacy argument remains accepted, but idle social is already the
     # default. It no longer authorizes a privileged operation.
     a.add_argument("--include-social",action="store_true",help=argparse.SUPPRESS)
@@ -580,12 +583,16 @@ def main(argv=None):
                     WHERE status='finished'""")[0]["n"]
                 pending=db.read("""SELECT count(*) AS n FROM work_items
                     WHERE type='human_action' AND status IN ('pending','retry_wait')""")[0]["n"]
-                result={"status":"BLOCKED_HOST_WAKE" if not wired else
-                        "AWAITING_VERIFIED_MUSE_EXECUTION" if not started else "execution_observed",
-                        "host_wired_declared":wired,"observed_muse_started":started,
+                notices=db.read("SELECT count(*) AS n FROM host_wakeup_notifications")[0]["n"]
+                result={"status":"execution_observed" if started else
+                        "BEST_EFFORT_HOST_WAKE" if notices else
+                        "AWAITING_VERIFIED_MUSE_EXECUTION" if wired else "BLOCKED_HOST_WAKE",
+                        "host_wired_declared":wired,"best_effort_notice_count":notices,
+                        "observed_muse_started":started,
                         "observed_muse_finished":finished,"pending_human_actions":pending,
                         "deployed_handshake_is_not_execution_readiness":True,
-                        "host_attestation_required":True}
+                        "host_attestation_required_for_reliable_mode":True,
+                        "wake_return_is_not_host_acceptance":True}
             elif args.command=="muse-consume":
                 result=MuseConsumer(db,cfg.lease_seconds,cfg).consume(
                     args.wakeup_id,args.wakeup_generation,args.worker,now)
@@ -599,7 +606,8 @@ def main(argv=None):
                 # slice. Social is normal low-priority Agent work; platform
                 # action permissions are evaluated separately at send time.
                 result=HostHandoff(db,cfg.lease_seconds).prepare(
-                    args.owner,now,allow_social=cfg.community_social_enabled)
+                    args.owner,now,allow_social=cfg.community_social_enabled,
+                    capability=args.host_capability)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}
