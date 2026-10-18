@@ -199,6 +199,36 @@ class Queue:
             row["payload"]=json.loads(row["payload"])
             return row
 
+    def agent_owned_tx(self,c,ident,owner,generation,now):
+        """Public Queue lease verification within Agent-completion transaction."""
+        row=c.execute("""SELECT * FROM work_items WHERE id=?
+            AND type='human_action' AND status='running'
+            AND lease_owner=? AND lease_version=? AND lease_until>?""",
+            (ident,owner,generation,now)).fetchone()
+        if row is None:
+            raise StaleLease("work Queue lease expired or changed generation")
+        return dict(row)
+
+    def agent_renew_tx(self,c,ident,owner,generation,now,lease_until):
+        self.agent_owned_tx(c,ident,owner,generation,now)
+        n=c.execute("""UPDATE work_items SET lease_until=? WHERE id=?
+            AND status='running' AND lease_owner=? AND lease_version=?
+            AND lease_until>?""",
+            (lease_until,ident,owner,generation,now)).rowcount
+        if n!=1:
+            raise StaleLease("work Queue lease lost generation during Agent renewal")
+
+    def agent_finish_tx(self,c,ident,owner,generation,now,evidence):
+        """Mark business work done only after Outbox and Worker validated it."""
+        self.agent_owned_tx(c,ident,owner,generation,now)
+        n=c.execute("""UPDATE work_items SET status='done',evidence=?,
+            block_reason=NULL,first_action_at=COALESCE(first_action_at,?),
+            last_progress_at=?,lease_owner=NULL,lease_until=NULL WHERE id=?
+            AND status='running' AND lease_owner=? AND lease_version=?""",
+            (canonical(evidence),now,now,ident,owner,generation)).rowcount
+        if n!=1:
+            raise StaleLease("work Queue completion lost generation")
+
     def renew(self, item, now, evidence):
         """Renew a live local lease only with new nontrivial progress evidence."""
         if not isinstance(evidence,dict) or not evidence or (
