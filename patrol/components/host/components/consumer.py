@@ -77,10 +77,13 @@ class MuseConsumer:
             prior=c.execute("""SELECT * FROM wakeup_execution_receipts
                 WHERE wakeup_id=?""",(wakeup_id,)).fetchone()
             if prior:
-                if (prior["worker"]!=worker or
-                        prior["wakeup_generation"]!=generation or
-                        prior["status"] not in ("started","progress")):
-                    raise StaleLease("Worker start belongs to another generation or worker")
+                if prior["wakeup_generation"]!=generation:
+                    raise StaleLease("Host Worker receipt belongs to an older generation")
+                if prior["worker"]!=worker:
+                    return {"deferred":{"hint_status":"another_worker_owns_original_intent",
+                                        "advice":"do not duplicate Worker execution"}}
+                if prior["status"] not in ("started","progress"):
+                    raise StaleLease("Worker start is no longer active")
                 live=c.execute("""SELECT * FROM schedule_activities
                     WHERE id=? AND status='running' AND lease_owner=?
                     AND lease_version=? AND lease_until>?""",
