@@ -15,29 +15,38 @@ class Wakeups:
         added=0
         with self.db.transaction() as c:
             # Only actual agent-decision work, not mere uninspected messages.
-            # Blocked includes 'no executor': it still needs Muse judgement.
-            works=c.execute("""SELECT w.id,w.priority,e.source,
+            # Blocked/denied work cannot be executed; only due runnable work wakes Muse.
+            works=c.execute("""SELECT w.id,w.priority,w.start_by,w.due_at,e.source,
                     a.status AS activity_status,a.base_priority,a.deadline,
                     a.ready_since,a.virtual_runtime,a.switch_cost
                 FROM work_items w LEFT JOIN events e ON e.id=w.event_id
                 LEFT JOIN schedule_activities a ON a.work_id=w.id
                 WHERE w.type='human_action'
-                  AND w.status IN ('pending','retry_wait','blocked','needs_approval')
+                  AND w.status IN ('pending','retry_wait')
+                  AND w.next_action_at<=?
                   AND (w.priority>=? OR
+                       (w.start_by IS NOT NULL AND w.start_by<=?) OR
+                       (w.due_at IS NOT NULL AND w.due_at<=?) OR
                        (a.status IN ('ready','suspended')
                         AND w.due_at IS NOT NULL AND a.deadline<=?))
                   AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
                   AND NOT EXISTS(SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
                 ORDER BY w.priority DESC,w.created_at LIMIT ?""",
-                (threshold,now+3600,min(800,max(limit*4,limit)))).fetchall()
+                (now,threshold,now,now,now+3600,min(800,max(limit*4,limit)))).fetchall()
             for w in works:
                 # Use the same dynamic deadline/fairness policy as Scheduler;
                 # a low base score can become urgent near its real deadline.
                 effective=max(float(w["priority"]),activity_priority(w,now)) if (
                     w["activity_status"] in ("ready","suspended")
                 ) else float(w["priority"])
-                if effective<threshold:
+                due=bool(w["priority"]>=threshold or
+                         (w["start_by"] is not None and w["start_by"]<=now) or
+                         (w["due_at"] is not None and w["due_at"]<=now) or
+                         (w["deadline"] is not None and w["deadline"]<=now+3600))
+                if effective<threshold and not due:
                     continue
+                if effective<threshold:
+                    effective=threshold
                 effective=min(100,max(0,int(round(effective))))
                 k="work:"+w["id"]
                 n=c.execute("""INSERT INTO wakeup_requests(
@@ -105,7 +114,7 @@ class Wakeups:
         if row["source_type"]=="work":
             return bool(c.execute("""SELECT 1 FROM work_items WHERE id=?
                 AND type='human_action' AND status IN
-                ('pending','retry_wait','blocked','needs_approval')""",
+                ('pending','retry_wait')""",
                 (row["source_id"],)).fetchone())
         if row["source_type"]=="social":
             return bool(c.execute("""SELECT 1 FROM schedule_activities a
@@ -190,7 +199,7 @@ class Wakeups:
                     "host_called":False}
 
     def claim_next(self, owner, now, limit=100, allow_social=False,
-                   social_activity_id=None):
+                   social_activity_id=None, focus_work_id=None):
         """Atomically reserve the highest-priority due host signal.
 
         Unlike export -> claim, selection and lease acquisition happen inside
@@ -205,8 +214,10 @@ class Wakeups:
                 WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?
                   AND (source_type!='social' OR
                        (? AND source_id=?))
+                  AND (? IS NULL OR (source_type='work' AND source_id=?))
                 ORDER BY priority DESC,created_at,id LIMIT ?""",
-                (now,1 if allow_social else 0,social_activity_id or "",limit)).fetchall()
+                (now,1 if allow_social else 0,social_activity_id or "",
+                 focus_work_id,focus_work_id,limit)).fetchall()
             for row in rows:
                 if not self._source_alive(c,row):
                     c.execute("""UPDATE wakeup_requests SET status='obsolete',
