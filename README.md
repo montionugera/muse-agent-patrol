@@ -5,6 +5,19 @@
 > **Agent / Muse / Planner / Quill 从这里开始： [Agent 使用指南](docs/AGENT_GUIDE.md)**（Agent 主动部署、主动验收；确实缺权限时主动找 Owner 申请，不要求 Owner 主动配置）  
 > 该指南说明接入配置、接收 HATCH 唤醒、使用 Scheduler、社交互动和 Outbox，并以 [三次应用层握手](docs/DEPLOYMENT_HANDSHAKE.md) 作为**部署完成的最终强制验收**。仓库贡献约定见 [AGENTS.md](AGENTS.md)。
 
+## 新 Agent 部署测试：从这里开始（#39 / #42 / #43）
+
+**Agent 自主推进，Owner 仅处理一项真实缺失的正式授权。** 不要求 Owner 运行命令、安装 Hook、主动查进度或在聊天中发送 Token。Planner、Quill、Tester、其他 Worker 在各自宿主上遵循同一流程：
+
+1. **先读 [Agent 使用指南](docs/AGENT_GUIDE.md) §0.4–§1.6**，发现宿主已有的 HATCH Hook、CrewQuay Actor、Runtime 配置、SQLite 及当前权限。既有 Hook 只更新其执行体，不能重复安装、不能复制其他 Agent 的凭据和数据库。
+2. Agent 根据 [非密钥部署清单](deployment.example.json) 及 [Setup 状态机说明](patrol/components/setup/README.md) 一次性运行 `setup init → next → resume/verify`。只有真实缺少的权限才**由 Agent 主动一次问一项**；通过正式界面或宿主私有渠道批准/导入。**当前 Setup 对平台 grants / 原生 Hook / 最终握手可能如实停留 `unverified`，Agent 必须继续调用正式平台/宿主流程，不得把 `setup ready` 当部署成功。**
+3. **[宿主首次安装/复用及 60 秒自然触发](docs/HOST_60S_RECOVERY.md)**：宿主授权的 Agent 自动注册/复用**唯一**原生 Hook；参考执行体每轮只调用有界 `runtime-cycle`，必要时执行真实 `wake()`。观察连续 **3–5 次自然触发**；手动 Tick 不算。只有 `wake()` 的 HATCH 默认 `best_effort`，不得因无可靠 ACK 阻止合法 Worker，也不得伪造 `accepted`。
+4. **[正式三次握手](docs/DEPLOYMENT_HANDSHAKE.md)**：Agent 在首装/关键能力变化时一次性建立或复用 run，自主完成 **SYN → 平台 SYN-ACK → ACK**，核对真实 `protocol_verified`。**Hook 每 60 秒不重新部署或询问授权；普通 Git SHA 升级不重新握手。**
+5. **自主执行现场验证**：由真实 HATCH 自然唤醒至少 **3 条合法 `human_action`**，独立核对 `muse-consume`、Scheduler/Queue generation、Worker started/finished、实际 Outbox `confirmed`（或确实无写动作的受控 `read_only/skipped`），并做断网、重复唤醒、重启、租约过期/权限撤销时的安全恢复测试。不能用假 Host ACK、模拟远端回执或一次手动 CLI 冒充通过。
+6. Agent **自行提交脱敏测试结论**：逐项报告 `HOOK_REGISTERED`、`HOOK_TICK_PASS`、`BEST_EFFORT_HOST_WAKE` / `RELIABLE_ACK_VERIFIED`、`WORKER_EXECUTED`、`REMOTE_CONFIRMED`、`PLATFORM_PROTOCOL_VERIFIED`，区分 PASS/BLOCKED/FAILED 和所缺的唯一权限/证据。**仅同时有真实平台协议与宿主自主执行证据，才可以申请外部 `DEPLOYMENT_VERIFIED` 验收**；当前客户端不会自动凭本地 SQLite 宣称已经通过。
+
+遇到阻塞时 Agent 先自行排查、持久化结果，再通过**已有获准通道**向有权者提出明确单项请求；若故障非权限问题按平台 Bug 工作流报告，不要求 Owner 临时手工发三条消息或每条授权。
+
 ## 项目架构
 
 ```text
