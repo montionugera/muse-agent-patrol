@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from patrol.components.host.index import HostHandoff, MuseConsumer
 from patrol.components.persistence.index import Database, StaleLease
@@ -122,6 +123,50 @@ class AgentLeaseRecoveryTests(unittest.TestCase):
             "real-agent",1005)
         self.assertEqual(again["status"],"already_finished")
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+
+    def test_issue26_recovery_fault_leaves_original_confirmed_effects_and_leases(self):
+        pack=self.started
+        oid=Outbox(self.db).stage("issue26:confirmed-original-once","agent_1",
+            "send","chat_owner",{"content":"already sent"},1002,
+            schedule_context={"id":pack["scheduler_activity_id"],
+                              "owner":"real-agent",
+                              "generation":pack["scheduler_generation"]})
+        with self.db.transaction() as c:
+            c.execute("""UPDATE outbox SET status='confirmed',
+                remote_id='external_test_exact' WHERE id=?""",(oid,))
+        self.muse.scheduler.checkpoint(
+            pack["scheduler_activity_id"],"real-agent",
+            pack["scheduler_generation"],1003,{"phase":"safe point"},voluntary=True)
+        original=self.muse.wakeups.agent_record_execution_tx
+        def fail_after_progress(*args,**kwargs):
+            result=original(*args,**kwargs)
+            raise RuntimeError("fixture crash after new generation progress")
+        with patch.object(self.muse.wakeups,"agent_record_execution_tx",
+                          side_effect=fail_after_progress):
+            with self.assertRaisesRegex(RuntimeError,"crash after"):
+                self.muse.recover_exact_confirmed(
+                    self.ticket["wakeup_id"],self.ticket["notification_generation"],
+                    "real-agent",1004)
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(self.id,))[0]["status"],
+            "pending")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM schedule_activities WHERE id=?",
+            (pack["scheduler_activity_id"],))[0]["status"],"suspended")
+        receipt=self.db.read(
+            "SELECT status,activity_generation FROM wakeup_execution_receipts WHERE wakeup_id=?",
+            (self.ticket["wakeup_id"],))[0]
+        self.assertEqual(receipt["status"],"started")
+        self.assertEqual(receipt["activity_generation"],pack["scheduler_generation"])
+        self.assertEqual(self.db.read("SELECT status FROM outbox WHERE id=?",
+                                      (oid,))[0]["status"],"confirmed")
+        self.assertEqual(self.db.read("SELECT count(*) n FROM outbox")[0]["n"],1)
+        recovered=self.muse.recover_exact_confirmed(
+            self.ticket["wakeup_id"],self.ticket["notification_generation"],
+            "real-agent",1005)
+        self.assertTrue(recovered["recovered_original_confirmed"])
+        self.assertEqual(recovered["confirmed_outbox_ids"],[oid])
+        self.assertEqual(self.db.read("SELECT count(*) n FROM outbox")[0]["n"],1)
 
     def test_issue47_recovery_rejects_missing_remote_proof_and_wrong_worker(self):
         pack=self.started
