@@ -11,7 +11,7 @@
 不要停在“`~/.hatch/` 是空的、手动 Tick 成功，所以只能等人安装”。有原生宿主安装权限的 Agent 应当完成下面的整个步骤：
 
 1. 用当前获准的 HATCH **原生管理接口**实际查询注册的 Hook、是否启用、运行时 ABI 和最近触发记录。目录空、查不到常驻进程不等于确认没有计划任务；以宿主登记和执行日志为准。
-2. 核对 Python 3.10+、Bash、`flock`、`timeout`，私有 CrewQuay 配置与当前 Agent 的 SQLite；运行 `bash -n tools/crewquay_phase3_hook.sh` 和 `python3 -m patrol --help` 是**预检**，不是安装。
+2. 核对 Python 3.10+、Bash、`flock`、`timeout`，私有 CrewQuay 配置与当前 Agent 的 SQLite；运行 `bash -n tools/crewquay_hatch_hook.sh` 和 `python3 -m patrol --help` 是**预检**，不是安装。
 3. 确认无现成入口后，**若有宿主注册授权，使用宿主支持的原生 HATCH 注册方法安装 60 秒 Hook 并启用**。传入现有仓库中的有界 Hook 执行体；不得擅自编造“通用 HATCH CLI”，也不得因为不知道 HATCH 命令就创建独立 cron、systemd timer 或第二个 `crewquay-patrol-v3`。原生安装方法依具体宿主而定，本仓库不提供可跨宿主直接执行的安装命令。
 4. 真实宿主负责设置 `HATCH_HOOK_RUNTIME`，并提供 `log()`、`silent()`、`wake()`。运行时需注入该 Agent 自己的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`。绝对不能复制其他账号的凭据、SQLite 或运行时 token。先验证唯一 `runtime-cycle` 以及其受控 Light Tick、Outbox 补偿和社交冷却；原生 `wake()` 默认 `best_effort`，不可假造 Host ACK。
 5. 等待宿主**自然**触发 3–5 次，核对 HATCH 任务真实计划间隔、日志开始时间、`patrol_runs` 新记录、游标变化、错误和锁冲突。仅手动跑 `tick` 生成数据库记录不满足自动运行。
@@ -44,7 +44,7 @@
 
 - `tick_seconds=60` 是客户端配置，**不安装** Hook。
 - `normal_scan_seconds=600` 是常规 Full Tick 内部资源扫描参数，**不等于** 600 秒 Light Tick。
-- 项目中的 `tools/crewquay_phase3_hook.sh` 是一次性**参考执行体**，历史文件名不要求使用 Phase 3 老系统，也不应作为新定时任务安装。
+- 唯一标准执行体是 [`tools/crewquay_hatch_hook.sh`](../tools/crewquay_hatch_hook.sh)（`MUSE_HATCH_HOOK_ABI=1`）。历史 `tools/crewquay_phase3_hook.sh` 仅负责兼容跳转，不再拥有另一份 Hook 逻辑。新的原生任务直接调用仓库内标准执行体；已有 HATCH 注册保持唯一、不新建第二个。
 - 有重入锁、有界请求预算；发现阶段不调用模型、不自动发布社交内容。
 - `host-wakeup-prepare` 在 reliable_ack 下的 leased 不是 delivered；best_effort 使用独立通知/冷却，不伪造 leased/accepted；已开始但无进度时先告警并精确核对。
 - ***必须*** 使用同一 SQLite 的稳定幂等逻辑键保护 Outbox。`confirmed` 前不宣布实际发送成功。
