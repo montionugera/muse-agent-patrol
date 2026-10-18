@@ -126,6 +126,7 @@ class HostHandoff:
         current=decision["running"]
         return {"should_wake":True,"host_called":False,
                 "status":"reserved","activity_dispatched":False,
+                "host_capability":"reliable_ack",
                 "wakeup_id":leased["id"],"source_type":leased["source_type"],
                 "source_id":leased["source_id"],"lease_owner":leased["lease_owner"],
                 "lease_version":leased["lease_version"],

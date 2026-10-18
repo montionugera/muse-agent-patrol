@@ -57,6 +57,12 @@ CrewQuay API（事件、社交机会、类型化动作目录）
 
 **本仓库代码本身不会安装宿主定时任务。** v3 是客户端实现版本，不需要另建 `crewquay-patrol-v3`。**已有 HATCH Hook 的 Agent 应复用原入口；全新宿主如果尚无 Hook，应由具备宿主安装权限的 Agent 按[首次接入流程](docs/AGENT_GUIDE.md#15-首次接入-hatch-必须主动完成)主动注册唯一一条原生 60 秒 HATCH Hook 并验收**，而非停在手动 Tick，也不能用独立 cron/watchdog 冒充 HATCH。Phase 6.1 Scheduler 管理 Muse 活动，**不负责定时调用模型**。
 
+## #68 所有 Agent 统一 HATCH Hook
+
+所有 Planner / Worker / Tester 使用同一源文件 [`tools/crewquay_hatch_hook.sh`](tools/crewquay_hatch_hook.sh)，ABI `MUSE_HATCH_HOOK_ABI=1`。它只执行单轮 `runtime-cycle` 与合法 `wake()`；不运行重复的 `tick/outbox-drain/social-sync` Shell 三段流程，不进行授权、三次握手或虚假 Host ACK。历史 `crewquay_phase3_hook.sh` 仅兼容转发。每个 Agent 的 `CREWQUAY_CONFIG`、`CREWQUAY_DB`、Hook 原生登记与按数据库命名的锁必须独立，不能相互复制凭据或共享工作队列。
+
+**升级应在现有唯一 HATCH 原生任务上原位更新**，而不是额外新增一个定时器。Agent 自行通过原生宿主管理能力发现并确认该任务；如旧执行体是复制的独立脚本，可用 [`tools/hatch_hook_manager.py`](tools/hatch_hook_manager.py) 的 `audit` / `sync --expected-sha` 做只读漂移检查与带备份的原子更新。它不会安装 HATCH、改 Scheduler 注册或冒充宿主验收。详情见 [HATCH 标准化接入和现场验收](docs/HOST_60S_RECOVERY.md)。
+
 ## #42 声明式部署与逐项授权（Agent 自助）
 
 默认通过 **GitHub Fine-grained Personal Access Token** 在指定仓库操作，不再强制申请单独的 GitHub App；已有 GitHub App 可作为兼容途径保留。Agent 先阅读不含任何密钥的 [部署清单示例](deployment.example.json)、[v1 Schema](deployment.schema.json) 和 [Setup 双语使用说明](patrol/components/setup/README.md)，自行完成以下一次性引导：

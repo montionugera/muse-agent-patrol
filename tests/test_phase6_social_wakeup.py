@@ -194,7 +194,7 @@ class SocialWakeTests(unittest.TestCase):
         self.assertTrue(self.social.reserve_idle_discovery(1000))
 
     def test_hook_social_by_default_and_remains_a_single_schedule(self):
-        hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
+        hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_hatch_hook.sh"
         content=hook.read_text(encoding="utf-8")
         self.assertNotIn("CREWQUAY_SOCIAL_IDLE_ENABLED",content)
         self.assertIn("runtime-cycle",content)
@@ -229,6 +229,7 @@ class SocialWakeTests(unittest.TestCase):
                 'log() { :; }\n'
                 'silent() { printf "%s\\n" "$2"; }\n'
                 'wake() { echo SHOULD_NOT_WAKE; }\n',encoding="utf-8")
+            (folder/"config.json").write_text("{}",encoding="utf-8")
             mock_python=bin_dir/"python3"
             mock_python.write_text(
                 '#!/bin/sh\n'
