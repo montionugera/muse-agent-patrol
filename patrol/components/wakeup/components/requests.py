@@ -437,6 +437,19 @@ class Wakeups:
 
     def record_execution(self, ident, wakeup_generation, activity_id,
                          activity_generation, worker, phase, now, evidence):
+        """Public standalone Worker receipt transaction; no Host acceptance inferred."""
+        with self.db.transaction() as c:
+            return self.agent_record_execution_tx(
+                c,ident,wakeup_generation,activity_id,activity_generation,
+                worker,phase,now,evidence)
+
+    def agent_record_execution_tx(self,c,ident,wakeup_generation,activity_id,
+                                  activity_generation,worker,phase,now,evidence):
+        """Persist current authentic Worker receipt within caller's SQLite transaction.
+
+        This may be composed atomically with Scheduler grant and Queue claim;
+        no remote action, fake Host ACK, or stale generation is permitted.
+        """
         """Worker-owned receipts are separate from HATCH's host acceptance.
 
         This call does NOT invoke a model or certify a remote platform action.
@@ -452,71 +465,70 @@ class Wakeups:
         payload=canonical(evidence)
         if len(payload.encode("utf-8"))>4096:
             raise ValueError("worker execution evidence exceeds 4 KiB")
-        with self.db.transaction() as c:
-            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(ident,)).fetchone()
-            if not wake or not self._worker_intent_valid(c,wake,wakeup_generation):
-                raise StaleLease("current reliable Host receipt or best-effort worker intent required")
-            activity=c.execute("SELECT * FROM schedule_activities WHERE id=?",
-                               (activity_id,)).fetchone()
-            if not activity:
-                raise StaleLease("unknown Scheduler activity")
-            if wake["source_type"]=="work":
-                matched=activity["work_id"]==wake["source_id"]
-            elif wake["source_type"]=="social":
-                matched=activity["id"]==wake["source_id"]
-            else:
-                promise=c.execute("SELECT work_item_id FROM promises WHERE id=?",
-                                  (wake["source_id"],)).fetchone()
-                matched=bool(promise and (
-                    activity["work_id"]==promise["work_item_id"] or
-                    activity["logical_key"]==
-                    "promise_due:"+wake["logical_key"][len("promise:"):]
-                ))
-            if not matched:
-                raise StaleLease("wakeup source does not belong to activity")
-            prior=c.execute("SELECT * FROM wakeup_execution_receipts WHERE wakeup_id=?",
-                            (ident,)).fetchone()
-            if phase in ("started","progress"):
-                if (activity["status"]!="running" or activity["lease_owner"]!=worker
-                        or activity["lease_version"]!=activity_generation
-                        or activity["lease_until"]<=now):
-                    raise StaleLease("worker execution needs a live scheduler generation")
-            elif (activity["status"]!="completed"
-                  or activity["lease_version"]!=activity_generation+1):
-                raise StaleLease("completion needs a finished scheduler generation")
-            if prior:
-                if (prior["worker"]!=worker
-                        or prior["activity_id"]!=activity_id
-                        or prior["wakeup_generation"]!=wakeup_generation
-                        or activity_generation<prior["activity_generation"]
-                        or (activity_generation>prior["activity_generation"]
-                            and phase!="progress")):
-                    raise StaleLease("worker or generation stale; resumed slice must attest progress")
-                # After a safe-point yield, the same verified worker may
-                # record progress under a *new*, currently live Scheduler
-                # generation, without rewriting the original host wakeup.
-                if prior["status"]=="finished":
-                    return {"wakeup_id":ident,"phase":"finished","already_recorded":True}
-                if phase=="started":
-                    return {"wakeup_id":ident,"phase":prior["status"],"already_recorded":True}
-                c.execute("""UPDATE wakeup_execution_receipts
-                    SET status=?,activity_generation=?,updated_at=?,
-                        finished_at=?,evidence=?
-                    WHERE wakeup_id=?""",
-                    (phase,activity_generation,now,
-                     now if phase=="finished" else None,payload,ident))
-            else:
-                if phase!="started":
-                    raise ValueError("execution must be started before progress or finish")
-                c.execute("""INSERT INTO wakeup_execution_receipts(
-                    wakeup_id,wakeup_generation,activity_id,activity_generation,
-                    worker,status,started_at,updated_at,evidence)
-                    VALUES(?,?,?,?,?,'started',?,?,?)""",
-                    (ident,wakeup_generation,activity_id,activity_generation,
-                     worker,now,now,payload))
-                c.execute("""UPDATE host_wakeup_notifications
-                    SET worker_started_at=COALESCE(worker_started_at,?)
-                    WHERE wakeup_id=? AND generation=?""",(now,ident,wakeup_generation))
+        wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(ident,)).fetchone()
+        if not wake or not self._worker_intent_valid(c,wake,wakeup_generation):
+            raise StaleLease("current reliable Host receipt or best-effort worker intent required")
+        activity=c.execute("SELECT * FROM schedule_activities WHERE id=?",
+                           (activity_id,)).fetchone()
+        if not activity:
+            raise StaleLease("unknown Scheduler activity")
+        if wake["source_type"]=="work":
+            matched=activity["work_id"]==wake["source_id"]
+        elif wake["source_type"]=="social":
+            matched=activity["id"]==wake["source_id"]
+        else:
+            promise=c.execute("SELECT work_item_id FROM promises WHERE id=?",
+                              (wake["source_id"],)).fetchone()
+            matched=bool(promise and (
+                activity["work_id"]==promise["work_item_id"] or
+                activity["logical_key"]==
+                "promise_due:"+wake["logical_key"][len("promise:"):]
+            ))
+        if not matched:
+            raise StaleLease("wakeup source does not belong to activity")
+        prior=c.execute("SELECT * FROM wakeup_execution_receipts WHERE wakeup_id=?",
+                        (ident,)).fetchone()
+        if phase in ("started","progress"):
+            if (activity["status"]!="running" or activity["lease_owner"]!=worker
+                    or activity["lease_version"]!=activity_generation
+                    or activity["lease_until"]<=now):
+                raise StaleLease("worker execution needs a live scheduler generation")
+        elif (activity["status"]!="completed"
+              or activity["lease_version"]!=activity_generation+1):
+            raise StaleLease("completion needs a finished scheduler generation")
+        if prior:
+            if (prior["worker"]!=worker
+                    or prior["activity_id"]!=activity_id
+                    or prior["wakeup_generation"]!=wakeup_generation
+                    or activity_generation<prior["activity_generation"]
+                    or (activity_generation>prior["activity_generation"]
+                        and phase!="progress")):
+                raise StaleLease("worker or generation stale; resumed slice must attest progress")
+            # After a safe-point yield, the same verified worker may
+            # record progress under a *new*, currently live Scheduler
+            # generation, without rewriting the original host wakeup.
+            if prior["status"]=="finished":
+                return {"wakeup_id":ident,"phase":"finished","already_recorded":True}
+            if phase=="started":
+                return {"wakeup_id":ident,"phase":prior["status"],"already_recorded":True}
+            c.execute("""UPDATE wakeup_execution_receipts
+                SET status=?,activity_generation=?,updated_at=?,
+                    finished_at=?,evidence=?
+                WHERE wakeup_id=?""",
+                (phase,activity_generation,now,
+                 now if phase=="finished" else None,payload,ident))
+        else:
+            if phase!="started":
+                raise ValueError("execution must be started before progress or finish")
+            c.execute("""INSERT INTO wakeup_execution_receipts(
+                wakeup_id,wakeup_generation,activity_id,activity_generation,
+                worker,status,started_at,updated_at,evidence)
+                VALUES(?,?,?,?,?,'started',?,?,?)""",
+                (ident,wakeup_generation,activity_id,activity_generation,
+                 worker,now,now,payload))
+            c.execute("""UPDATE host_wakeup_notifications
+                SET worker_started_at=COALESCE(worker_started_at,?)
+                WHERE wakeup_id=? AND generation=?""",(now,ident,wakeup_generation))
         return {"wakeup_id":ident,"phase":phase,"already_recorded":False,
                 "remote_action_confirmed":False}
 

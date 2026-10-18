@@ -87,6 +87,38 @@ not those ledger APIs as a substitute for a started Worker.
 Production acceptance requires natural HATCH wake, actual Muse execution,
 and current platform receipts; local fixtures are not that evidence.
 
+## Atomic Muse startup and retry (#26)
+
+After the native Host supplies a current best-effort intent or verified reliable
+acceptance, `muse-consume` registers any missing ready work without reserving
+it, then opens **one SQLite BEGIN IMMEDIATE**. Inside that transaction it
+rechecks the Host generation, Actor identity and exact wake source; grants the
+highest-ranked Scheduler slice (selection guards are not priority overrides),
+claims the linked human Queue lease if applicable, and persists the independent
+Worker `started` receipt. Social and standalone promise sessions use the
+same atomic Scheduler + Worker boundary without fabricating Queue leases.
+
+**If any grant/claim/receipt step fails, every running-lease and Worker receipt
+write rolls back.** SQLite may still retain previously registered ready work.
+If the Worker started successfully but the CLI response was lost, repeating
+`muse-consume` with the **same original wake generation and Worker identity**
+reads back the same live lease and returns `already_started=true`; it does
+not claim a new generation, replay a remote request or forge another start.
+A competing Worker is deferred, a stale Host generation fails closed, and
+a previously started but no-longer-live session requires original Worker /
+Outbox recovery evidence rather than a blind new grant.
+
+For a reply already independently `confirmed` under its original
+`scheduled_outbox` IDs, `muse-recover-confirmed` now reacquires both leases,
+attests the original Worker's new-generation **progress** (not a new start),
+and completes local Work + Scheduler + receipt **in the same transaction**.
+If a crash or failure occurs, none of these local recovery steps commits.
+The original remote effect is never re-posted. Recovery is not a substitute
+for getting independent CrewQuay receipt proof.
+
+This is a local database safety property verified by failure injection;
+it does **not** mean a live HATCH/Agent installation was tested.
+
 ## Safe recovery inspection for previously answered work (#47)
 
 Before replaying any wake, claiming a stale work lease, or attempting a new

@@ -116,99 +116,108 @@ class Queue:
         if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
             raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
-            if authorization_evidence.get("kind")=="accepted_host_wakeup":
-                wake=c.execute("""SELECT w.id FROM wakeup_requests w
-                    WHERE w.id=? AND w.status='accepted' AND w.lease_version=?
-                    AND ((w.source_type='work' AND w.source_id=?)
-                      OR (w.source_type='promise' AND EXISTS(
-                          SELECT 1 FROM promises p WHERE p.id=w.source_id
-                          AND p.work_item_id=? AND p.status!='done'
-                          AND w.logical_key=('promise:'||p.id||':'||
-                              CAST(p.next_action_at AS TEXT)))))""",
-                    (authorization_evidence.get("wakeup_id"),
-                     authorization_evidence.get("wakeup_generation"),
-                     ident,ident)).fetchone()
-                if wake is None:
-                    raise StaleLease("Muse handoff requires an accepted matching host wakeup")
-            elif authorization_evidence.get("kind")=="best_effort_host_wakeup":
-                # Worker identity and *live* Scheduler lease are still required;
-                # this check establishes intent provenance, NOT Host accepted.
-                wake=c.execute("""SELECT w.id FROM wakeup_requests w
-                    JOIN host_wakeup_notifications n ON n.wakeup_id=w.id
-                    WHERE w.id=? AND w.status IN ('pending','retry_wait','unknown')
-                      AND ((w.source_type='work' AND w.source_id=?)
-                        OR (w.source_type='promise' AND EXISTS(
-                            SELECT 1 FROM promises p WHERE p.id=w.source_id
-                            AND p.work_item_id=? AND p.status!='done'
-                            AND w.logical_key=('promise:'||p.id||':'||
-                                CAST(p.next_action_at AS TEXT)))))
-                      AND n.capability='best_effort' AND n.generation=?""",
-                    (authorization_evidence.get("wakeup_id"),ident,ident,
-                     authorization_evidence.get("wakeup_generation"))).fetchone()
-                if wake is None:
-                    raise StaleLease("Muse handoff needs a current best-effort notification intent")
-            # Scheduler-controlled work must be claimed by the same worker
-            # in the current live time slice; legacy unscheduled work is
-            # unchanged. Prevent claiming the underlying Queue in suspension.
-            activity=c.execute("""SELECT id,status,lease_owner,lease_version,
-                    lease_until,preempt_requested,weight FROM schedule_activities
-                    WHERE work_id=?""",(ident,)).fetchone()
-            source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
-            if source and source["status"]=="running":
-                raise ValueError("human work unavailable or already leased")
-            manual_unblock=bool(
-                activity and source and
-                source["status"] in ("blocked","needs_approval") and
-                activity["status"] in ("ready","suspended") and
-                not c.execute("SELECT 1 FROM schedule_activities WHERE status='running' LIMIT 1").fetchone()
-            )
-            # An explicitly evidenced operator handoff of blocked work
-            # precedes scheduling; it does not grant remote permissions.
-            if activity and not manual_unblock and (
-                activity["status"]!="running" or
-                activity["lease_owner"]!=owner or
-                activity["lease_until"] is None or activity["lease_until"]<=now or
-                activity["preempt_requested"]
-            ):
-                raise StaleLease("work claim requires the active scheduler lease")
-            n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
-                lease_version=lease_version+1,attempts=attempts+1
-                WHERE id=? AND type='human_action' AND status IN
-                    ('pending','retry_wait','blocked','needs_approval')
-                AND next_action_at<=?""",(owner,now+self.lease_seconds,ident,now)).rowcount
+            return self.agent_claim_specific_tx(c,ident,owner,now,authorization_evidence)
+
+    def agent_claim_specific_tx(self,c,ident,owner,now,authorization_evidence):
+        """Verify authentic Host wake and claim Queue under caller-owned transaction."""
+        if (not isinstance(owner,str) or not 1<=len(owner)<=128 or
+                not isinstance(ident,str) or not 1<=len(ident)<=128 or
+                not isinstance(authorization_evidence,dict) or
+                not authorization_evidence):
+            raise ValueError("bounded Worker identity and Host evidence required")
+        if authorization_evidence.get("kind")=="accepted_host_wakeup":
+            wake=c.execute("""SELECT w.id FROM wakeup_requests w
+                WHERE w.id=? AND w.status='accepted' AND w.lease_version=?
+                AND ((w.source_type='work' AND w.source_id=?)
+                  OR (w.source_type='promise' AND EXISTS(
+                      SELECT 1 FROM promises p WHERE p.id=w.source_id
+                      AND p.work_item_id=? AND p.status!='done'
+                      AND w.logical_key=('promise:'||p.id||':'||
+                          CAST(p.next_action_at AS TEXT)))))""",
+                (authorization_evidence.get("wakeup_id"),
+                 authorization_evidence.get("wakeup_generation"),
+                 ident,ident)).fetchone()
+            if wake is None:
+                raise StaleLease("Muse handoff requires an accepted matching host wakeup")
+        elif authorization_evidence.get("kind")=="best_effort_host_wakeup":
+            # Worker identity and *live* Scheduler lease are still required;
+            # this check establishes intent provenance, NOT Host accepted.
+            wake=c.execute("""SELECT w.id FROM wakeup_requests w
+                JOIN host_wakeup_notifications n ON n.wakeup_id=w.id
+                WHERE w.id=? AND w.status IN ('pending','retry_wait','unknown')
+                  AND ((w.source_type='work' AND w.source_id=?)
+                    OR (w.source_type='promise' AND EXISTS(
+                        SELECT 1 FROM promises p WHERE p.id=w.source_id
+                        AND p.work_item_id=? AND p.status!='done'
+                        AND w.logical_key=('promise:'||p.id||':'||
+                            CAST(p.next_action_at AS TEXT)))))
+                  AND n.capability='best_effort' AND n.generation=?""",
+                (authorization_evidence.get("wakeup_id"),ident,ident,
+                 authorization_evidence.get("wakeup_generation"))).fetchone()
+            if wake is None:
+                raise StaleLease("Muse handoff needs a current best-effort notification intent")
+        # Scheduler-controlled work must be claimed by the same worker
+        # in the current live time slice; legacy unscheduled work is
+        # unchanged. Prevent claiming the underlying Queue in suspension.
+        activity=c.execute("""SELECT id,status,lease_owner,lease_version,
+                lease_until,preempt_requested,weight FROM schedule_activities
+                WHERE work_id=?""",(ident,)).fetchone()
+        source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
+        if source and source["status"]=="running":
+            raise ValueError("human work unavailable or already leased")
+        manual_unblock=bool(
+            activity and source and
+            source["status"] in ("blocked","needs_approval") and
+            activity["status"] in ("ready","suspended") and
+            not c.execute("SELECT 1 FROM schedule_activities WHERE status='running' LIMIT 1").fetchone()
+        )
+        # An explicitly evidenced operator handoff of blocked work
+        # precedes scheduling; it does not grant remote permissions.
+        if activity and not manual_unblock and (
+            activity["status"]!="running" or
+            activity["lease_owner"]!=owner or
+            activity["lease_until"] is None or activity["lease_until"]<=now or
+            activity["preempt_requested"]
+        ):
+            raise StaleLease("work claim requires the active scheduler lease")
+        n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
+            lease_version=lease_version+1,attempts=attempts+1
+            WHERE id=? AND type='human_action' AND status IN
+                ('pending','retry_wait','blocked','needs_approval')
+            AND next_action_at<=?""",(owner,now+self.lease_seconds,ident,now)).rowcount
+        if n!=1:
+            raise ValueError("human work unavailable or already leased")
+        row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
+        if manual_unblock:
+            # An operator can explicitly clear a blocked work item without
+            # an existing model slice. Reserve its Scheduler lease in this
+            # SAME transaction so the resulting action still needs fencing.
+            slice_seconds=min(30.0,max(1.0,self.lease_seconds-1.0))
+            n=c.execute("""UPDATE schedule_activities SET status='running',
+                lease_owner=?,lease_version=lease_version+1,
+                lease_until=?,slice_until=?,last_started_at=?,
+                last_charged_at=?,last_updated=?,preempt_requested=0,
+                preempt_mode=NULL,preempt_reason=NULL
+                WHERE id=? AND status IN ('ready','suspended')""",
+                (owner,now+self.lease_seconds,now+slice_seconds,now,now,now,
+                 activity["id"])).rowcount
             if n!=1:
-                raise ValueError("human work unavailable or already leased")
-            row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
-            if manual_unblock:
-                # An operator can explicitly clear a blocked work item without
-                # an existing model slice. Reserve its Scheduler lease in this
-                # SAME transaction so the resulting action still needs fencing.
-                slice_seconds=min(30.0,max(1.0,self.lease_seconds-1.0))
-                n=c.execute("""UPDATE schedule_activities SET status='running',
-                    lease_owner=?,lease_version=lease_version+1,
-                    lease_until=?,slice_until=?,last_started_at=?,
-                    last_charged_at=?,last_updated=?,preempt_requested=0,
-                    preempt_mode=NULL,preempt_reason=NULL
-                    WHERE id=? AND status IN ('ready','suspended')""",
-                    (owner,now+self.lease_seconds,now+slice_seconds,now,now,now,
-                     activity["id"])).rowcount
-                if n!=1:
-                    raise StaleLease("manual work handoff could not reserve scheduler")
-            if activity:
-                lease=c.execute("""SELECT id,lease_version FROM schedule_activities
-                    WHERE work_id=? AND status='running' AND lease_owner=?""",
-                    (ident,owner)).fetchone()
-                if lease:
-                    row["scheduler_activity_id"]=lease["id"]
-                    row["scheduler_generation"]=lease["lease_version"]
-            # Append-only evidence of the claimed local handoff, including lease generation.
-            # This is not a CrewQuay permission check or remote task claim.
-            detail={"work_id":ident,"owner":owner,"lease_version":row["lease_version"],
-                    "operator_evidence":authorization_evidence}
-            c.execute("INSERT INTO alerts(logical_key,kind,detail,created_at) VALUES(?,?,?,?)",
-                      ("handoff:"+ident+":"+str(row["lease_version"]),"local_handoff",canonical(detail),now))
-            row["payload"]=json.loads(row["payload"])
-            return row
+                raise StaleLease("manual work handoff could not reserve scheduler")
+        if activity:
+            lease=c.execute("""SELECT id,lease_version FROM schedule_activities
+                WHERE work_id=? AND status='running' AND lease_owner=?""",
+                (ident,owner)).fetchone()
+            if lease:
+                row["scheduler_activity_id"]=lease["id"]
+                row["scheduler_generation"]=lease["lease_version"]
+        # Append-only evidence of the claimed local handoff, including lease generation.
+        # This is not a CrewQuay permission check or remote task claim.
+        detail={"work_id":ident,"owner":owner,"lease_version":row["lease_version"],
+                "operator_evidence":authorization_evidence}
+        c.execute("INSERT INTO alerts(logical_key,kind,detail,created_at) VALUES(?,?,?,?)",
+                  ("handoff:"+ident+":"+str(row["lease_version"]),"local_handoff",canonical(detail),now))
+        row["payload"]=json.loads(row["payload"])
+        return row
 
     def agent_owned_tx(self,c,ident,owner,generation,now):
         """Public Queue lease verification within Agent-completion transaction."""
