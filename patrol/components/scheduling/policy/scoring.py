@@ -2,13 +2,18 @@
 import math
 
 
-def priority(row, now, *, running=False):
-    base=float(row["base_priority"])
+def intrinsic_priority(row, now):
+    """Base priority plus genuine deadline urgency, excluding aging/fairness."""
     deadline=row["deadline"]
     urgent=0.0
     if deadline is not None:
         remaining=float(deadline)-now
-        urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
+        urgent=75.0 if remaining<=0 else max(0.0,75.0*(1.0-remaining/3600.0))
+    return float(row["base_priority"])+urgent
+
+
+def priority(row, now, *, running=False):
+    core=intrinsic_priority(row,now)
     ready_since=float(row["ready_since"])
     # Waiting credit is bounded (<=60) and belongs to the slice that won
     # dispatch. Dropping it to zero immediately after grant lets another
@@ -27,7 +32,7 @@ def priority(row, now, *, running=False):
     # continuity, while new resumptions pay a measured local restore penalty.
     restore=0 if running else min(15.0,float(row["switch_cost"]))
     continuity=8.0 if running else 0.0
-    return round(base+urgent+aging-fair-restore+continuity,3)
+    return round(core+aging-fair-restore+continuity,3)
 
 
 def quantum(weight):
@@ -57,14 +62,7 @@ def preemption(running, challenger, now):
     # genuinely more important fresh Owner/action. Compare intrinsic urgency
     # independently of age; a large base/deadline gap is preemptible even
     # when the running slice won with maximum waiting credit.
-    running_core=float(running["base_priority"])+(
-        75.0 if running_deadline is not None and running_deadline<=now else
-        max(0.0,75.0*(1.0-(running_deadline-now)/3600.0))
-        if running_deadline is not None else 0.0)
-    other_core=float(challenger["base_priority"])+(
-        75.0 if remaining<=0 else
-        max(0.0,75.0*(1.0-remaining/3600.0)) if remaining<math.inf else 0.0)
-    if other_core>=running_core+25:
+    if intrinsic_priority(challenger,now)>=intrinsic_priority(running,now)+25:
         return "medium_safe_point"
     if other_score>=active_score+12+min(8.0,float(running["switch_cost"])/2):
         return "medium_safe_point"
