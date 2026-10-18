@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from ...setup.components.manifest import Manifest
-from ...setup.components.secrets import read_secret, private_dirs
+from ...setup.components.secrets import read_secret, private_dirs, SecretUnavailable
 from .transport import GitHubAPI
 
 _KEY=re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$")
@@ -173,7 +173,7 @@ class GitHubOperations:
         try:
             token=read_secret(self.manifest.state_dir,
                               self.manifest.data["github"]["credential_ref"])
-        except (OSError,ValueError) as e:
+        except (OSError,ValueError,SecretUnavailable) as e:
             reason=getattr(e,"reason","SECURE_GITHUB_SECRET_UNAVAILABLE")
             return {"status":"blocked","reason":reason,
                     "new_request_sent":False,"remote_effect_confirmed":False}
