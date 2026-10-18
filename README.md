@@ -57,6 +57,9 @@ CrewQuay API（事件、社交机会、类型化动作目录）
 
 **本仓库代码本身不会安装宿主定时任务。** v3 是客户端实现版本，不需要另建 `crewquay-patrol-v3`。**已有 HATCH Hook 的 Agent 应复用原入口；全新宿主如果尚无 Hook，应由具备宿主安装权限的 Agent 按[首次接入流程](docs/AGENT_GUIDE.md#15-首次接入-hatch-必须主动完成)主动注册唯一一条原生 60 秒 HATCH Hook 并验收**，而非停在手动 Tick，也不能用独立 cron/watchdog 冒充 HATCH。Phase 6.1 Scheduler 管理 Muse 活动，**不负责定时调用模型**。
 
+### #71：已有 HATCH 不注入环境变量时，直接换新
+
+已有原生 HATCH 注册如果不能注入 `CREWQUAY_*`，**不需要兼容旧 Hook**。由有宿主操作权限的 Agent 确认唯一任务 ID 与脚本路径，使用 [直接迁移工具](tools/hatch_direct_migrate.py) 的 `plan` / `apply`，将**原注册指向的同一个文件**原子替换为标准 `crewquay_hatch_hook.sh`；旧版仅私有备份用于必要时回滚。新脚本从自己旁边的 0600 `*.binding.json` 获取本 Agent 的私有 repo/DB/config/真实原生 HATCH runtime 路径，**不会运行旧代码或建立第二个定时器**。如果找不到真实 native `wake()`，立即停止迁移并保留已回滚生产版本。完整部署字段、旧 770 权限修正前置条件、回滚及自然 3–5 Tick 门槛见 [HATCH 宿主指南](docs/HOST_60S_RECOVERY.md)。
 ## #68 所有 Agent 统一 HATCH Hook
 
 所有 Planner / Worker / Tester 使用同一源文件 [`tools/crewquay_hatch_hook.sh`](tools/crewquay_hatch_hook.sh)，ABI `MUSE_HATCH_HOOK_ABI=1`。它只执行单轮 `runtime-cycle` 与合法 `wake()`；不运行重复的 `tick/outbox-drain/social-sync` Shell 三段流程，不进行授权、三次握手或虚假 Host ACK。历史 `crewquay_phase3_hook.sh` 仅兼容转发。每个 Agent 的 `CREWQUAY_CONFIG`、`CREWQUAY_DB`、Hook 原生登记与按数据库命名的锁必须独立，不能相互复制凭据或共享工作队列。
