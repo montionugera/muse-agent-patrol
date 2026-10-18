@@ -78,10 +78,17 @@ class NotificationRoutingTests(unittest.TestCase):
 
         # Once the original decision is running, another signal must not be
         # silently merged into its already-started, possibly stale execution.
+        # Choose the exact tsk_1 event rather than the first task.ready
+        # by random SQLite UUID ordering (which could be tsk_2).
+        tsk_1=self.db.read("""SELECT w.id FROM work_items w
+            JOIN events e ON e.id=w.event_id
+            WHERE w.type='human_action'
+              AND json_extract(e.payload,'$.type')='task.ready'
+              AND json_extract(e.payload,'$.resourceId')='tsk_1'""")
+        self.assertEqual(len(tsk_1),1)
         with self.db.transaction() as c:
             c.execute("UPDATE work_items SET status='running' WHERE id=?",
-                      (next(r["id"] for r in works if
-                            json.loads(r["payload"])["event_type"]=="task.ready"),))
+                      (tsk_1[0]["id"],))
         self.feed([("task.ready", "tsk_1")])
         self.assertEqual(self.tick.execute(25), 1)
         self.assertEqual(len(self.pending()), 4)
