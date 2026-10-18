@@ -117,11 +117,17 @@ class Queue:
             raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
             if authorization_evidence.get("kind")=="accepted_host_wakeup":
-                wake=c.execute("""SELECT id FROM wakeup_requests
-                    WHERE id=? AND source_type='work' AND source_id=?
-                    AND status='accepted' AND lease_version=?""",
-                    (authorization_evidence.get("wakeup_id"),ident,
-                     authorization_evidence.get("wakeup_generation"))).fetchone()
+                wake=c.execute("""SELECT w.id FROM wakeup_requests w
+                    WHERE w.id=? AND w.status='accepted' AND w.lease_version=?
+                    AND ((w.source_type='work' AND w.source_id=?)
+                      OR (w.source_type='promise' AND EXISTS(
+                          SELECT 1 FROM promises p WHERE p.id=w.source_id
+                          AND p.work_item_id=? AND p.status!='done'
+                          AND w.logical_key=('promise:'||p.id||':'||
+                              CAST(p.next_action_at AS TEXT)))))""",
+                    (authorization_evidence.get("wakeup_id"),
+                     authorization_evidence.get("wakeup_generation"),
+                     ident,ident)).fetchone()
                 if wake is None:
                     raise StaleLease("Muse handoff requires an accepted matching host wakeup")
             elif authorization_evidence.get("kind")=="best_effort_host_wakeup":
@@ -129,10 +135,15 @@ class Queue:
                 # this check establishes intent provenance, NOT Host accepted.
                 wake=c.execute("""SELECT w.id FROM wakeup_requests w
                     JOIN host_wakeup_notifications n ON n.wakeup_id=w.id
-                    WHERE w.id=? AND w.source_type='work' AND w.source_id=?
-                      AND w.status IN ('pending','retry_wait','unknown')
+                    WHERE w.id=? AND w.status IN ('pending','retry_wait','unknown')
+                      AND ((w.source_type='work' AND w.source_id=?)
+                        OR (w.source_type='promise' AND EXISTS(
+                            SELECT 1 FROM promises p WHERE p.id=w.source_id
+                            AND p.work_item_id=? AND p.status!='done'
+                            AND w.logical_key=('promise:'||p.id||':'||
+                                CAST(p.next_action_at AS TEXT)))))
                       AND n.capability='best_effort' AND n.generation=?""",
-                    (authorization_evidence.get("wakeup_id"),ident,
+                    (authorization_evidence.get("wakeup_id"),ident,ident,
                      authorization_evidence.get("wakeup_generation"))).fetchone()
                 if wake is None:
                     raise StaleLease("Muse handoff needs a current best-effort notification intent")
@@ -208,6 +219,17 @@ class Queue:
         if row is None:
             raise StaleLease("work Queue lease expired or changed generation")
         return dict(row)
+
+    def agent_suspend_tx(self,c,ident,owner,generation,now,next_action_at):
+        """Release a human_action promise lease without marking work done."""
+        self.agent_owned_tx(c,ident,owner,generation,now)
+        n=c.execute("""UPDATE work_items SET status='pending',next_action_at=?,
+            lease_owner=NULL,lease_until=NULL,lease_version=lease_version+1,
+            block_reason=NULL WHERE id=? AND status='running'
+            AND lease_owner=? AND lease_version=?""",
+            (next_action_at,ident,owner,generation)).rowcount
+        if n!=1:
+            raise StaleLease("promise progress lost Queue generation")
 
     def agent_renew_tx(self,c,ident,owner,generation,now,lease_until):
         self.agent_owned_tx(c,ident,owner,generation,now)
