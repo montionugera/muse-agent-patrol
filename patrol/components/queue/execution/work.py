@@ -90,6 +90,27 @@ class Queue:
             result["payload"] = json.loads(result["payload"])
             return result
 
+    def quarantine_unknown(self, now, limit=25):
+        """Boundedly flag truly unsupported work kinds; never touch Muse work."""
+        if type(limit) is not int or not 1<=limit<=100:
+            raise ValueError("invalid quarantine batch")
+        with self.db.transaction() as c:
+            rows=c.execute("""SELECT id,type FROM work_items
+                WHERE type NOT IN ('inspect_event','human_action')
+                AND status IN ('pending','retry_wait') AND next_action_at<=?
+                AND lease_owner IS NULL
+                ORDER BY created_at,id LIMIT ?""",(now,limit)).fetchall()
+            for row in rows:
+                c.execute("""UPDATE work_items SET status='blocked',
+                    block_reason=? WHERE id=? AND status IN ('pending','retry_wait')
+                    AND lease_owner IS NULL""",
+                    ("no authorized executor for "+row["type"],row["id"]))
+                c.execute("""INSERT INTO alerts(logical_key,kind,detail,created_at)
+                    VALUES(?,?,?,?) ON CONFLICT(logical_key) DO NOTHING""",
+                    ("missing_executor:"+row["id"],"blocked",
+                     canonical({"work_id":row["id"],"type":row["type"]}),now))
+            return len(rows)
+
     def claim_specific(self, ident, owner, now, authorization_evidence):
         """Explicit local handoff. Evidence is an operator assertion, not platform approval."""
         if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
