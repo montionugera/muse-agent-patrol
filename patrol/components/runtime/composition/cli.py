@@ -14,6 +14,7 @@ from pathlib import Path
 from ...config.index import load_config
 from ...deployment.index import Deployment
 from ...host.index import HostHandoff
+from ...host.components.consumer import MuseConsumer
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
 from ...executor.index import ActionSender
@@ -166,6 +167,19 @@ def parser():
     a.add_argument("--score",type=int,required=True)
     a.add_argument("--actor",required=True)
     a.add_argument("--reason",required=True)
+    a.add_argument("--evidence",required=True)
+    sub.add_parser("autonomy-status")
+    a=sub.add_parser("muse-consume")
+    a.add_argument("--wakeup-id",required=True)
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
+    a=sub.add_parser("muse-finish")
+    a.add_argument("--wakeup-id",required=True)
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
+    a.add_argument("--activity-id",required=True)
+    a.add_argument("--activity-generation",type=int,required=True)
+    a.add_argument("--work-lease-version",type=int,required=True)
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("host-wakeup-prepare")
     # Legacy argument remains accepted, but idle social is already the
@@ -559,6 +573,28 @@ def main(argv=None):
                 result=MessageScores(db).rate(args.event_id,args.score,args.actor,
                                               args.reason,evidence(args.evidence),now)
             
+            elif args.command=="autonomy-status":
+                import os
+                wired=os.environ.get("CREWQUAY_HOST_WAKEUP_WIRED")=="1"
+                started=db.read("SELECT count(*) AS n FROM wakeup_execution_receipts")[0]["n"]
+                finished=db.read("""SELECT count(*) AS n FROM wakeup_execution_receipts
+                    WHERE status='finished'""")[0]["n"]
+                pending=db.read("""SELECT count(*) AS n FROM work_items
+                    WHERE type='human_action' AND status IN ('pending','retry_wait')""")[0]["n"]
+                result={"status":"BLOCKED_HOST_WAKE" if not wired else
+                        "AWAITING_VERIFIED_MUSE_EXECUTION" if not started else "execution_observed",
+                        "host_wired_declared":wired,"observed_muse_started":started,
+                        "observed_muse_finished":finished,"pending_human_actions":pending,
+                        "deployed_handshake_is_not_execution_readiness":True,
+                        "host_attestation_required":True}
+            elif args.command=="muse-consume":
+                result=MuseConsumer(db,cfg.lease_seconds).consume(
+                    args.wakeup_id,args.wakeup_generation,args.worker,now)
+            elif args.command=="muse-finish":
+                result=MuseConsumer(db,cfg.lease_seconds).finish(
+                    args.wakeup_id,args.wakeup_generation,args.worker,
+                    args.activity_id,args.activity_generation,
+                    args.work_lease_version,now,evidence(args.evidence))
             elif args.command=="host-wakeup-prepare":
                 # The host decides which authenticated Agent gets a time
                 # slice. Social is normal low-priority Agent work; platform
@@ -647,7 +683,9 @@ def main(argv=None):
             result["outbox_status"]=durable_status
             result["status"]="confirmed" if result["sent"] else "prepared"
         print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
-        failed={"authorization_failed","failed","deferred","degraded","partial","blocked","not_found"}
+        failed={"authorization_failed","failed","deferred","degraded","partial","blocked",
+                "not_found","BLOCKED_HOST_WAKE","scheduler_deferred","identity_pending",
+                "work_not_ready","requires_specialized_consumer"}
         return 0 if result.get("status") not in failed and result.get("imported") is not False else 1
     except Busy:
         print(json.dumps({"status":"busy","action":"deferred; no concurrent writer"}))
