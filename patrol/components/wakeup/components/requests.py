@@ -344,6 +344,71 @@ class Wakeups:
         return {"id":ident,"status":"retry_wait","host_called":False}
 
 
+    def agent_intent_tx(self,c,ident,generation):
+        """Return only a currently valid reliable ACK or best-effort intent."""
+        wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(ident,)).fetchone()
+        mode=self._worker_intent_valid(c,wake,generation) if wake else None
+        if not mode:
+            raise StaleLease("Host receipt or notification intent superseded")
+        return {**dict(wake),"host_capability":mode}
+
+    def agent_started_tx(self,c,ident,generation,worker,activity_id,
+                         activity_generation):
+        """Check existing independent Worker start/progress; no Host ACK inferred."""
+        row=c.execute("""SELECT * FROM wakeup_execution_receipts WHERE wakeup_id=?""",
+                      (ident,)).fetchone()
+        if (not row or row["status"] not in ("started","progress")
+                or row["worker"]!=worker or row["activity_id"]!=activity_id
+                or row["wakeup_generation"]!=generation
+                or row["activity_generation"]>activity_generation):
+            raise StaleLease("missing current verified Worker start/progress")
+        return dict(row)
+
+    def agent_heartbeat_tx(self,c,ident,generation,worker,activity_id,
+                           activity_generation,work_lease_version,now,evidence):
+        """Persist monotonic liveness without advancing business progress."""
+        self.agent_started_tx(c,ident,generation,worker,activity_id,activity_generation)
+        prev=c.execute("SELECT * FROM worker_lease_heartbeats WHERE wakeup_id=?",
+                       (ident,)).fetchone()
+        if prev and (prev["worker"]!=worker or
+                     prev["wakeup_generation"]!=generation or
+                     prev["activity_id"]!=activity_id or
+                     prev["activity_generation"]>activity_generation or
+                     prev["work_lease_version"]!=work_lease_version or
+                     evidence["observation_seq"]<=prev["observation_seq"] or
+                     evidence["host_session"]!=json.loads(prev["evidence"])["host_session"]):
+            raise StaleLease("stale, replayed or different Host liveness observation")
+        c.execute("""INSERT INTO worker_lease_heartbeats(
+            wakeup_id,worker,wakeup_generation,activity_id,activity_generation,
+            work_lease_version,observation_seq,last_observed_at,evidence)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(wakeup_id) DO UPDATE SET
+            activity_generation=excluded.activity_generation,
+            observation_seq=excluded.observation_seq,
+            last_observed_at=excluded.last_observed_at,evidence=excluded.evidence""",
+            (ident,worker,generation,activity_id,activity_generation,
+             work_lease_version,evidence["observation_seq"],now,canonical(evidence)))
+
+    def agent_finish_tx(self,c,ident,generation,worker,activity_id,
+                        activity_generation,now,evidence,remote_ids,host_capability):
+        """Finish Worker receipt and retire best-effort advice atomically."""
+        self.agent_started_tx(c,ident,generation,worker,activity_id,activity_generation)
+        n=c.execute("""UPDATE wakeup_execution_receipts SET status='finished',
+            activity_generation=?,updated_at=?,finished_at=?,evidence=?
+            WHERE wakeup_id=? AND worker=? AND status IN ('started','progress')""",
+            (activity_generation,now,now,
+             canonical({"work_id":evidence.get("work_id"),
+                        "confirmed_outbox_ids":remote_ids,
+                        "decision":evidence.get("decision")}),ident,worker)).rowcount
+        if n!=1:
+            raise StaleLease("Worker completion receipt lost generation")
+        if host_capability=="best_effort":
+            n=c.execute("""UPDATE wakeup_requests SET status='obsolete'
+                WHERE id=? AND status IN ('pending','retry_wait','unknown')""",
+                (ident,)).rowcount
+            if n!=1:
+                raise StaleLease("best-effort intent changed during Worker completion")
+
     def record_execution(self, ident, wakeup_generation, activity_id,
                          activity_generation, worker, phase, now, evidence):
         """Worker-owned receipts are separate from HATCH's host acceptance.
