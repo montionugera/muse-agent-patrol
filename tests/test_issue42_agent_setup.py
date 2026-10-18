@@ -115,7 +115,12 @@ class SetupTests(unittest.TestCase):
             self.setup.skip_optional("crewquay_identity")
         result=self.setup.skip_optional("github_credential")
         self.assertEqual(result["status"],"skipped_optional")
+        self.assertEqual(result["skipped_steps"],
+                         ["github_credential","github_repositories","github_permissions"])
         self.assertEqual(result["grants_changed"],False)
+        self.assertTrue(all(x["status"]=="skipped_optional"
+                            for x in self.setup.status()["steps"]
+                            if x["step"].startswith("github_")))
         self.probes.overrides["native_hatch"]=observation(
             "unverified","NATIVE_HATCH_REGISTRATION_NOT_OBSERVED",
             "agent_check_real_native_hook_registration_and_3_ticks")
