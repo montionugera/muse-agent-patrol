@@ -75,11 +75,9 @@ class Phase2Tests(unittest.TestCase):
         Tick(self.db,self.cfg,clock=lambda:1000).run(light=True)
         self.assertEqual(self.db.read("SELECT * FROM wakeup_requests"),[])
 
-    def test_stage_once_blocked_high_priority_then_fenced_ack(self):
+    def test_stage_once_runnable_high_priority_then_fenced_ack(self):
         q=Queue(self.db)
         ident=q.enqueue("human:fixture","human_action",{"fixture":True},1000,priority=90)
-        with self.db.transaction() as c:
-            c.execute("UPDATE work_items SET status='blocked' WHERE id=?",(ident,))
         w=Wakeups(self.db)
         self.assertEqual(w.stage(1000),1)
         self.assertEqual(w.stage(1001),0)
@@ -96,7 +94,7 @@ class Phase2Tests(unittest.TestCase):
         self.assertFalse(done["business_work_completed"])
         self.assertEqual(w.stage(1005),0)
         self.assertEqual(w.export(1005)["requests"],[])
-        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE id=?",(ident,))[0]["status"],"blocked")
+        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE id=?",(ident,))[0]["status"],"pending")
 
     def test_unknown_after_crash_is_not_blindly_dispatched(self):
         q=Queue(self.db)
