@@ -11,11 +11,14 @@ def priority(row, now, *, running=False):
         urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
     ready_since=float(row["ready_since"])
     # The initial aging ramp is bounded to limit short-term thrashing. A
-    # second, slower *unbounded* waiting credit prevents indefinite starvation
-    # when high-base activities keep arriving. Each granted slice resets
-    # ready_since when the worker yields.
+    # second, slower credit helps moderate priority gaps. Both cap at 30:
+    # aging saturates at 60 after 45 minutes, so six-day-old work cannot
+    # accumulate the ~17000-point bonus that caused issue #45's immediate
+    # grant -> preempt -> StaleLease livelock. This is bounded fairness,
+    # NOT a guarantee against starvation under an endless stream of much
+    # higher-priority work. Each granted slice resets ready_since on yield.
     wait=max(0.0,now-ready_since)
-    aging=0.0 if running else min(30.0,wait/90.0)+max(0.0,wait-900.0)/30.0
+    aging=0.0 if running else min(30.0,wait/90.0)+min(30.0,max(0.0,wait-900.0)/30.0)
     fair=min(34.0,max(0.0,float(row["virtual_runtime"])/60.0))
     # Do not thrash on small priority changes. Existing work retains some
     # continuity, while new resumptions pay a measured local restore penalty.

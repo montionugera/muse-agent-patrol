@@ -657,8 +657,8 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                                   "send","chat",{"content":"no fence"},1002)
 
 
-    def test_unbounded_waiting_credit_eventually_beats_continuous_high_base(self):
-        self.add("urgent-looking-background","maintenance",now=1000,score=100)
+    def test_bounded_waiting_credit_raises_old_activity_past_moderate_gap(self):
+        self.add("urgent-looking-background","maintenance",now=1000,score=35)
         low=self.add("patient-background","maintenance",now=1000,score=5)
         picked=self.scheduler.dispatch("worker",1000)["activity"]
         # Use the pure heuristic to avoid expiring the simulated worker lease.
@@ -667,6 +667,67 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertLess(priority(waiting,1001),priority(running,1001,running=True))
         self.assertGreater(priority(waiting,5000),priority(running,5000,running=True))
         self.assertIsNotNone(preemption(running,waiting,5000))
+
+    def test_aging_second_term_is_capped_for_extreme_wait(self):
+        # Issue #45 (a): total aging saturates at 60 (30 + 30) no matter
+        # how long an activity has waited. Before the cap, a 6-day wait
+        # yielded aging ~17280 and a 1e9-second wait ~33 million.
+        row={"base_priority":0,"deadline":None,"ready_since":0,
+             "virtual_runtime":0,"switch_cost":0}
+        self.assertEqual(priority(row,518400),60.0)
+        self.assertEqual(priority(row,10**9),60.0)
+
+    def test_extreme_wait_alone_cannot_preempt_high_base_running_slice(self):
+        # Issue #45 (b): a challenger whose only advantage is an extreme
+        # wait must not preempt a running slice with a larger base
+        # advantage once aging is bounded. Before the cap, the challenger
+        # below scored ~17281 and preempted unconditionally.
+        now=10**7
+        running={"base_priority":100,"deadline":None,"ready_since":now,
+                 "virtual_runtime":0,"switch_cost":4,"slice_until":now+10000}
+        challenger={"base_priority":5,"deadline":None,
+                    "ready_since":now-518400,
+                    "virtual_runtime":0,"switch_cost":4}
+        self.assertEqual(priority(challenger,now),61.0)
+        self.assertLess(priority(challenger,now),
+                        priority(running,now,running=True))
+        self.assertIsNone(preemption(running,challenger,now))
+
+    def test_bounded_waiting_credit_cannot_beat_large_base_gap(self):
+        # Issue #45: aging must saturate, so a merely old challenger cannot
+        # preempt a running slice whose base advantage exceeds the bounded
+        # credit. Before the cap, this challenger scored ~17281 and
+        # preempted everything, livelocking grant -> preempt -> StaleLease.
+        self.add("high-base-running","maintenance",now=1000,score=100)
+        low=self.add("old-low-challenger","maintenance",now=1000,score=5)
+        picked=self.scheduler.dispatch("worker",1000)["activity"]
+        running=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(picked["id"],))[0]
+        waiting=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(low,))[0]
+        self.assertEqual(running["id"],picked["id"])
+        self.assertLess(priority(waiting,1000+518400),priority(running,1000+518400,running=True))
+        self.assertIsNone(preemption(running,waiting,1000+518400))
+
+    def test_issue45_six_day_backlog_does_not_fence_new_owner_claim(self):
+        # End-to-end regression for the production grant -> immediate
+        # preempt_requested -> work-claim StaleLease loop.
+        now=1000+6*86400
+        stale=Queue(self.db).enqueue("issue45:old-social","human_action",
+            {"reason":"stale low-value event"},1000,priority=5)
+        owner=Queue(self.db).enqueue("issue45:new-owner","human_action",
+            {"reason":"new Owner message"},now,priority=85)
+        first=self.scheduler.dispatch("worker-owner",now,for_work_id=owner)
+        self.assertTrue(first["granted"],first)
+        self.assertEqual(first["activity"]["work_id"],owner)
+        self.scheduler.reconcile(now+1)
+        running=self.scheduler.assess(now+1)["running"]
+        self.assertEqual(running["work_id"],owner)
+        self.assertFalse(running["preempt_requested"])
+        claim=Queue(self.db).claim_specific(owner,"worker-owner",now+2,
+                                            {"approved_by":"Owner"})
+        self.assertEqual(claim["scheduler_activity_id"],running["id"])
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(stale,))[0]["status"],
+            "pending")
 
     def test_imminent_deadline_protected_from_aged_nonurgent_activity(self):
         imminent=self.add("hard-due","work",now=1000,score=70,deadline=1015)
