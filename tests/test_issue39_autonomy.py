@@ -123,8 +123,9 @@ class AutonomyIssue39Tests(unittest.TestCase):
                                 pack["work_lease_version"],1003,
                                 {"decision":"read_only","reason":"No reply required"})
         self.assertEqual(result["status"],"finished")
-        with self.assertRaises(StaleLease):
-            self.muse.consume(ticket["wakeup_id"],ticket["lease_version"],"worker",1004)
+        self.assertEqual(
+            self.muse.consume(ticket["wakeup_id"],ticket["lease_version"],"worker",1004)["status"],
+            "work_not_ready")
 
 
 if __name__=="__main__":
