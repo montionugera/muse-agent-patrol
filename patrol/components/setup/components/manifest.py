@@ -45,7 +45,7 @@ def _string(value, label, pattern=None):
 
 
 def _path(value,label):
-    if not isinstance(value,str) or not value or "\x00" in value:
+    if not isinstance(value,(str,Path)) or not str(value) or "\x00" in str(value):
         raise ValueError("invalid "+label)
     p=Path(value).expanduser()
     if not p.is_absolute() or ".." in p.parts:
