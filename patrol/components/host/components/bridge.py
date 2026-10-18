@@ -12,7 +12,13 @@ class HostHandoff:
         self.scheduler=Scheduler(db,lease_seconds)
         self.wakeups=Wakeups(db,lease_seconds)
 
-    def prepare(self, owner, now, allow_social=True):
+    def prepare(self, owner, now, allow_social=True, capability="reliable_ack"):
+        if capability not in ("reliable_ack","best_effort","unavailable"):
+            raise ValueError("invalid verified Host capability")
+        if capability=="unavailable":
+            return {"should_wake":False,"host_called":False,
+                    "status":"host_unavailable","activity_dispatched":False,
+                    "host_capability":"unavailable"}
         """Reserve one due intent and provide bounded, non-content routing hints.
 
         The Hook invokes wake() only after a successful reservation. Its host
@@ -42,6 +48,25 @@ class HostHandoff:
         focus_work=(decision["candidate"]["work_id"]
                     if decision["candidate"] and
                        decision["candidate"]["kind"]=="work" else None)
+        if capability=="best_effort":
+            # Never consume a reliable-ACK delivery lease on hosts that can
+            # only notify the agent. The durable throttled advice is not an ACK.
+            if not focus_work:
+                return {"should_wake":False,"host_called":False,
+                        "status":"no_best_effort_work_consumer",
+                        "activity_dispatched":False,
+                        "host_capability":"best_effort",
+                        "scheduler_advice":decision["advice"]}
+            notice=self.wakeups.prepare_best_effort(focus_work,now)
+            if notice is None:
+                return {"should_wake":False,"host_called":False,
+                        "status":"notification_cooled_down","activity_dispatched":False,
+                        "host_capability":"best_effort",
+                        "scheduler_advice":decision["advice"]}
+            return {"should_wake":True,"host_called":False,
+                    "status":"notification_intent","activity_dispatched":False,
+                    **notice,"scheduler_advice":decision["advice"],
+                    "candidate_activity_id":decision["candidate"]["id"]}
         leased=self.wakeups.claim_next(
             owner,now,allow_social=social_eligible,
             social_activity_id=social_id,focus_work_id=focus_work)
