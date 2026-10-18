@@ -139,7 +139,7 @@ class Scheduler:
                 # as EDF urgency turns stale events into false emergencies.
                 deadline=(row["promise_due"] if row["promise_due"] is not None else
                           row["due_at"] if row["due_at"] is not None else
-                          row["start_by"] if score>=70 else None)
+                          row["start_by"] if score>=70 and row["event_source"]!="agent_events" else None)
                 # A work item has a unique Scheduler activity even when a
                 # previous operator registered it under a custom logical key.
                 # Looking up only "work:<id>" would attempt a duplicate insert.
