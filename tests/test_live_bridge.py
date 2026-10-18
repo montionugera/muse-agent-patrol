@@ -13,6 +13,7 @@ from patrol.components.persistence.index import Database, StaleLease
 from patrol.components.promises.index import Promises
 from patrol.components.queue.index import Queue, export_pending
 from patrol.components.runtime.index import Tick, main
+from patrol.components.scheduling.index import Scheduler
 from patrol.components.transport.index import Response
 
 
@@ -75,10 +76,12 @@ class BridgeTests(unittest.TestCase):
         Tick(self.db,self.cfg,clock=lambda:100).run()
         exported=export_pending(self.db,120)
         self.assertEqual(exported["mode"],"read_only_no_model_wakeup")
-        self.assertEqual(exported["human_actions"][0]["status"],"blocked")
-        self.assertFalse(exported["human_actions"][0]["claimable"])
+        self.assertEqual(exported["human_actions"][0]["status"],"pending")
+        self.assertTrue(exported["human_actions"][0]["claimable"])
         with self.assertRaises(ValueError):
             q.claim_specific(ident,"muse",120,{})
+        granted=Scheduler(self.db).dispatch("muse",120,for_work_id=ident)
+        self.assertTrue(granted["granted"],granted)
         first=q.claim_specific(ident,"muse",120,{"approved_by":"operator","scope":"test"})
         with self.assertRaises(ValueError):
             q.claim_specific(ident,"another",121,{"approved_by":"operator"})
