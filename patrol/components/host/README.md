@@ -35,8 +35,10 @@ replacement scheduler, additional timer, or second wakeup queue.
 
 `HostHandoff.prepare(owner,now,allow_social=True)` includes low-priority
 admitted social activity by default **only** if no Scheduler activity is
-running and the highest-priority eligible candidate is social. The same
-durable `wakeup_requests` lease and `wakeup-ack` proof protocol apply.
+running and the highest-priority eligible candidate is social. Reliable ACK
+uses the original `wakeup_requests` lease, while best-effort uses a separate
+bounded notice with no fabricated Host accepted receipt; real Muse can consume
+social and explicitly skip or finish one confirmed authorized action.
 No Scheduler time slice is claimed by this call; it neither starts nor
 implicitly authorizes a Muse model. Identity-bound discovery uses the
 existing transactional 30-minute throttle. Legacy callers can still pass

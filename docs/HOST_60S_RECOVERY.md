@@ -46,7 +46,7 @@
 - `normal_scan_seconds=600` 是常规 Full Tick 内部资源扫描参数，**不等于** 600 秒 Light Tick。
 - 项目中的 `tools/crewquay_phase3_hook.sh` 是一次性**参考执行体**，历史文件名不要求使用 Phase 3 老系统，也不应作为新定时任务安装。
 - 有重入锁、有界请求预算；发现阶段不调用模型、不自动发布社交内容。
-- `host-wakeup-prepare` 的 leased 不是 delivered；过期/unknown 不能无证据直接重唤醒。
+- `host-wakeup-prepare` 在 reliable_ack 下的 leased 不是 delivered；best_effort 使用独立通知/冷却，不伪造 leased/accepted；已开始但无进度时先告警并精确核对。
 - ***必须*** 使用同一 SQLite 的稳定幂等逻辑键保护 Outbox。`confirmed` 前不宣布实际发送成功。
 
 ## 验收与失败处理

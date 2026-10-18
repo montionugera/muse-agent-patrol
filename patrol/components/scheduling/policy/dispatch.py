@@ -309,7 +309,7 @@ class Scheduler:
         with self.db.transaction() as c:
             return self._assess_tx(c,now,False)
 
-    def dispatch(self,owner,now,for_work_id=None):
+    def dispatch(self,owner,now,for_work_id=None,for_activity_id=None):
         """Refresh actionable work then grant the top eligible time slice.
 
         An optional work ID is a *selection guard*, not a priority or
@@ -323,6 +323,10 @@ class Scheduler:
         if for_work_id is not None and (
                 not isinstance(for_work_id,str) or not 1<=len(for_work_id)<=128):
             raise ValueError("bounded local work ID required")
+        if for_activity_id is not None and (
+                not isinstance(for_activity_id,str) or not 1<=len(for_activity_id)<=128
+                or for_work_id is not None):
+            raise ValueError("bounded exclusive activity selection guard required")
         # tick --light and real Host wakeup are separate processes. Do not
         # assume the latest human_action has already been imported into the
         # Scheduler when a just-awakened worker calls schedule-next.
@@ -365,7 +369,8 @@ class Scheduler:
             if best is None or (for_work_id is not None and selected is None):
                 return {**view,**info,"granted":False,
                         "lease_recovered":expired,"activities_registered":refreshed}
-            if for_work_id is not None and selected["id"]!=best["id"]:
+            if ((for_work_id is not None and selected["id"]!=best["id"])
+                    or (for_activity_id is not None and best["id"]!=for_activity_id)):
                 return {**view,**info,"granted":False,
                         "hint_status":"outscored_by_other_activity",
                         "lease_recovered":expired,"activities_registered":refreshed}

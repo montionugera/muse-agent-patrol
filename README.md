@@ -97,7 +97,7 @@ python3 -m patrol --config "$CREWQUAY_CONFIG" --db "$CREWQUAY_DB" muse-consume \
 
 当每一条计划内 Outbox 均 `confirmed`（或者真实无写工作有可核查的 `{"decision":"read_only","reason":"..."}` 或 `skipped` 证据）后，Muse 运行 `muse-finish --wakeup-id ... --wakeup-generation ... --worker ... --activity-id ... --activity-generation ... --work-lease-version ... --evidence <JSON文件>`，在一个 SQLite 事务内完成 work、Scheduler 和 wakeup-execution finished；过期租约或 prepared/unknown Outbox 会被拒绝。抢占时沿用 `schedule-checkpoint --yield`，恢复后必须获得新的 generation、记录 progress，再执行。
 
-真实生产三项连续工作 E2E 仍须宿主现场验证，仓库单元测试只能模拟 Host 接收与 Outbox confirmed，**不得把测试伪造数据当成远端回执**。详见 [Agent 使用指南](docs/AGENT_GUIDE.md)。
+真实生产三项连续工作 E2E 仍须宿主现场验证，仓库单元测试只能模拟 Host 接收与 Outbox confirmed，**不得把测试伪造数据当成远端回执**。请真实 Agent 按 [原生宿主自助整体验收](docs/REAL_HOST_AGENT_ACCEPTANCE.md) 执行；首次部署入口见 [Agent 使用指南](docs/AGENT_GUIDE.md)。
 
 ## 主要能力
 

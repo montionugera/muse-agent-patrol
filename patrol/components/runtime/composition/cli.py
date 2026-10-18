@@ -653,19 +653,28 @@ def main(argv=None):
             
             elif args.command=="autonomy-status":
                 import os
-                wired=os.environ.get("CREWQUAY_HOST_WAKEUP_WIRED")=="1"
+                declared=os.environ.get("CREWQUAY_HOST_CAPABILITY")
+                if declared not in ("unavailable","best_effort","reliable_ack"):
+                    declared=None
                 started=db.read("SELECT count(*) AS n FROM wakeup_execution_receipts")[0]["n"]
                 finished=db.read("""SELECT count(*) AS n FROM wakeup_execution_receipts
                     WHERE status='finished'""")[0]["n"]
                 pending=db.read("""SELECT count(*) AS n FROM work_items
                     WHERE type='human_action' AND status IN ('pending','retry_wait')""")[0]["n"]
                 notices=db.read("SELECT count(*) AS n FROM host_wakeup_notifications")[0]["n"]
+                host_acks=db.read("""SELECT count(*) AS n FROM wakeup_requests
+                    WHERE status='accepted' AND dispatch_evidence IS NOT NULL""")[0]["n"]
                 result={"status":"execution_observed" if started else
-                        "BEST_EFFORT_HOST_WAKE" if notices else
-                        "AWAITING_VERIFIED_MUSE_EXECUTION" if wired else "BLOCKED_HOST_WAKE",
-                        "host_wired_declared":wired,"best_effort_notice_count":notices,
+                        "notification_intent_observed" if notices else
+                        "AWAITING_HOST_EXECUTION_EVIDENCE" if pending else
+                        "idle_no_execution_observed",
+                        "host_capability_declared_not_verified":declared,
+                        "best_effort_notice_count":notices,
+                        "reliable_host_ack_record_count":host_acks,
                         "observed_muse_started":started,
-                        "observed_muse_finished":finished,"pending_human_actions":pending,
+                        "observed_muse_finished":finished,
+                        "pending_human_actions":pending,
+                        "no_host_invocation_inferred":True,
                         "deployed_handshake_is_not_execution_readiness":True,
                         "host_attestation_required_for_reliable_mode":True,
                         "wake_return_is_not_host_acceptance":True}
