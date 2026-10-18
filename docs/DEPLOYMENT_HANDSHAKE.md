@@ -27,7 +27,7 @@
 4. **ACK**：实际被 HATCH 唤醒的 Agent 领取 `ACK_WORK_ID`（同第 2 步），执行 `cq deployment-stage-ack DEPLOYMENT_ID --owner WORKER --schedule-id LIVE_ACTIVITY_ID --schedule-generation LIVE_GENERATION`，再通过 `outbox-drain --once --id ...` 投递。Patrol 从 SQLite 读取不可打印的 challenge，并核对平台最终 `protocol_verified` + 三条不同消息 ID、SYN-ACK 事件 ID / cursor、原 Actor。客户端不会仅因 HTTP 200 就确认。
 5. **核验状态**：`cq deployment-reconcile`（本地，只读远端）与 `cq deployment-status --id DEPLOYMENT_ID`。可从 HATCH 自然 Tick 的工作队列、`patrol_runs`、`wakeup_execution_receipts`、Outbox `confirmed` 与平台状态核对真实运行证据。平台 `hostHookVerified:false` 是服务端无法观察外部宿主的如实声明。
 
-已有原生 HATCH Hook 会通过 `deployment-ensure` 按安装 SHA 自行发起/复用验证工作；Agent 须主动核对并推进后续 SYN/ACK，**不要求 Owner 手动调用握手**。新宿主的首条 Hook 则由有权限的 Agent 自主安装，缺少权限由 Agent 主动请求；这份客户端代码**不会自动安装 Hook**，也不宣称已在生产宿主实测。HATCH 仍唯一负责周期性触发，`deployment-reconcile` 在现有每次 Light Tick 内自动运行，不新增轮询。
+**部署工作流由真实 Agent 主动执行，不由 HATCH Hook 每分钟执行。** 首次安装或经核验的 Actor/宿主身份、协议/能力关键变化时，Agent 使用 `deployment-ensure --repo-sha ACTUAL_GIT_SHA`（或 `deployment-start`）建立/复用持久化 run，自己推进 SYN/ACK、核验平台最终回执。普通 Git SHA 更新只是版本证据，**不重新建 run、不重索权限、不重新握手**。新宿主的唯一原生 60 秒 HATCH Hook 由已有安装权限的 Agent 自主注册；缺少宿主权限时 Agent 主动申请而非要求 Owner 安装。Hook 每轮只调用有界 `runtime-cycle` 并把 Runtime 建议传给真实 `wake()`，平台事件及 `deployment.syn_ack` 可以通过其内部普通 Tick 自动采集，不再从 Hook 调 `deployment-ensure` / `platform-auth-bootstrap`，不另建轮询。
 
 ## 超时、恢复与报告 Bug
 

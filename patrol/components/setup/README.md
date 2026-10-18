@@ -62,7 +62,7 @@ Use GitHub's official PAT creation settings to limit repositories and Contents/I
 
 ### Unverified and unsupported observations
 
-CrewQuay grants are granted only by its official Actor authorization API; local requested scopes are not rights. HATCH registration / natural 3–5 ticks cannot be certified by an ordinary GitHub checkout or Hook environment variable. The platform SYN→SYN-ACK→ACK final state is separate from natural Host wake and real Worker/Outbox completion. These steps report `unverified` until a trusted native/Actor check exists. Therefore even `setup_steps_resolved` or a `verified` PAT file alone **never means** `DEPLOYMENT_VERIFIED`.
+CrewQuay grants are granted only by its official Actor authorization API; local requested scopes are not rights. **The current Setup probes still report CrewQuay live scope comparison, native HATCH registration and final deployment handshake as `unverified`: the CLI is a per-step advisory workflow, not a complete installation engine. The real Muse Agent must proceed through the linked Actor API / native HATCH / handshake steps and record their independent evidence rather than retry `setup next` indefinitely or treating that response as Owner approval.** HATCH registration / natural 3–5 ticks cannot be certified by an ordinary GitHub checkout or Hook environment variable. The platform SYN→SYN-ACK→ACK final state is separate from natural Host wake and real Worker/Outbox completion. These steps report `unverified` until a trusted native/Actor check exists. Therefore even `setup_steps_resolved` or a `verified` PAT file alone **never means** `DEPLOYMENT_VERIFIED`.
 
 If a credential is missing, the Agent should contact Owner with one concise request describing the official target (e.g. PAT limited to one repository, needed Contents write for a worker feature branch/PR), expected scope and risk, **never ask to paste the token in a chat**. If there is no secure import path, report `BLOCKED_SECURE_SECRET_INPUT` through the existing safe owner channel, and continue other pre-authorized work.
 
@@ -72,7 +72,7 @@ If a credential is missing, the Agent should contact Owner with one concise requ
 2. `setup next` 每次只返回一项缺失/待验证事项。Agent 能通过现有合法权限处理的就自己做；真正缺少凭据或仓库授权才主动询问 Owner，且只问这一项。Owner 通过 GitHub/CrewQuay/HATCH 的正式界面操作，不在聊天中发送 Token。
 3. 宿主安全渠道把 Token 导入私有文件，Agent 自动检测并只读核验。文件存在不等于授权、GitHub GET 成功不等于写权限、配置写着 `allow_pr_merge` 不等于能合并 main。
 4. 普通 Git SHA 升级不重置已审批的 CrewQuay grants、部署 run、原 Outbox/SQLite；配置变化只重新核验受影响项。用户明确拒绝后不可使用命令自行标记为 granted。
-5. 真正验收还要遵循 [宿主真实执行验收](../../../docs/REAL_HOST_AGENT_ACCEPTANCE.md)：原生 60 秒 Hook、平台三次握手、真实 Muse started/finished、Outbox confirmed 均需独立证据。缺少宿主能力要报告阻塞，不能制造 ACK。
+5. 真正验收还要遵循 [宿主自然 60 秒 Hook 验收](../../../docs/HOST_60S_RECOVERY.md)与[平台三次握手验收](../../../docs/DEPLOYMENT_HANDSHAKE.md)：原生 60 秒 Hook、平台三次握手、真实 Muse started/finished、Outbox confirmed 均需独立证据。缺少宿主能力要报告阻塞，不能制造 ACK。
 
 ## Boundaries
 
