@@ -211,10 +211,31 @@ class Setup:
 
     def verify(self):
         now=self.clock()
-        # Safe read-only checks for each independent component. This is not
-        # a fake real Host acceptance and never writes remote mutations.
-        return {"observations":[self._check_one(step,now) for step in _ORDER],
-                "state":self.status()}
+        # Diagnostics do not deliver Owner requests. In particular, do NOT
+        # mark all missing credentials 'asked' when the Agent runs verify:
+        # next() remains the sole one-item-at-a-time notification gate.
+        observations=[]
+        c=self._connect()
+        try:
+            for step in _ORDER:
+                check=self.probes.check(step)
+                if (not isinstance(check,dict) or
+                        set(check)!={"status","reason","next_action"}):
+                    raise ValueError("invalid safe setup probe result")
+                with c:
+                    current=c.execute("SELECT status,revision FROM setup_steps WHERE step=?",
+                                      (step,)).fetchone()
+                    if current and current["revision"]==self.manifest.revision and (
+                            current["status"] in ("denied","skipped_optional")):
+                        observations.append({"step":step,"status":current["status"],
+                                             "prompt_new":False})
+                        continue
+                    self._set(c,step,check,now)
+                observations.append({"step":step,**check,"prompt_new":False})
+        finally:
+            c.close()
+        return {"observations":observations,"state":self.status(),
+                "owner_contact_required":False,"remote_action_issued":False}
 
     def skip_optional(self,step):
         if step not in _ORDER or self._required(step):
