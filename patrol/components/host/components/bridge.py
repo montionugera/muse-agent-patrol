@@ -78,6 +78,17 @@ class HostHandoff:
                 return {"should_wake":False,"host_called":False,
                         "status":"promise_not_due",
                         "activity_dispatched":False}
+            signal=self.db.read("""SELECT w.id FROM wakeup_requests w
+                JOIN promises p ON p.id=w.source_id
+                WHERE w.source_type='promise' AND w.source_id=?
+                  AND w.logical_key=('promise:'||p.id||':'||
+                      CAST(p.next_action_at AS TEXT))
+                  AND w.status IN ('pending','retry_wait','unknown','leased','accepted')
+                LIMIT 1""",(focus_promise,))
+            if not signal:
+                return {"should_wake":False,"host_called":False,
+                        "status":"promise_signal_missing",
+                        "activity_dispatched":False}
         if capability=="best_effort":
             # Never consume a reliable-ACK delivery lease on hosts that can
             # only notify the agent. The durable throttled advice is not an ACK.
