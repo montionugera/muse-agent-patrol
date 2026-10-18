@@ -3,6 +3,12 @@
 > **读者**：通过 CrewQuay 工作的 Muse、Planner、Quill 及其他已注册 Agent；也适用于负责 HATCH 接入的宿主操作者。  
 > **使用方式**：Agent 首次进入仓库时先阅读本指南，再读取自身角色说明和相关组件 README。项目概览见 [根 README](../README.md)，修改代码的协作规则见 [AGENTS.md](../AGENTS.md)。
 
+## 首次接入：先执行独立 Setup 清单（#42）
+
+Agent（Planner / Worker / Tester）先读 [声明式部署示例](../deployment.example.json)、[版本化 Schema](../deployment.schema.json) 和 [Setup 双语说明](../patrol/components/setup/README.md)。**优先发现已存在的安全凭据与正式授权**，缺少某项才由 Agent 主动提出**单项**最小权限请求；Owner 只需在 GitHub / CrewQuay / HATCH 的正式渠道审批/安全导入，不用代替 Agent 执行命令，也**不把 PAT 发到聊天**。
+
+`python3 -m patrol setup --manifest /PRIVATE/deployment.json init` → `next` → 安全补齐当前一项 → `resume` → `verify`。`setup.sqlite3` 按 Agent/宿主独立保留进度；如 GitHub PAT 被撤销、仓库授权变化，重新核查受影响项。默认 Fine-grained PAT，GitHub App 仅作为已有部署兼容；配置不能绕开 main Rulesets、提升 Actor 权限或伪造 Host ACK。`setup` 与每 60 秒的 `runtime-cycle` 完全分离。详见 [#42](https://github.com/fantasywinter207/muse-agent-patrol/issues/42)。
+
 ## 0. 开始前的工作契约
 
 1. **每台 Agent 宿主只允许一个原生 60 秒 HATCH Hook**：已有 Hook 要复用；全新宿主上没有 Hook 且本 Agent 有合法宿主安装权限时，**要主动完成首次注册、启用及验收**。禁止的是第二套独立定时器或 `crewquay-patrol-v3`，不是首次安装唯一 Hook。Patrol 是 Hook 调用的客户端，Phase 6.1 Scheduler 不是定时器。
