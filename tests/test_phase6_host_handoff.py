@@ -118,10 +118,13 @@ class HostHandoffTests(unittest.TestCase):
     def test_hook_script_has_valid_shell_syntax_and_fenced_order(self):
         source=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
         script=source.read_text(encoding="utf-8")
-        self.assertIn("host-wakeup-prepare",script)
-        self.assertIn("outbox-drain --once --lane any",script)
-        self.assertLess(script.index("host-wakeup-prepare"),
+        self.assertIn("runtime-cycle",script)
+        self.assertLess(script.index("runtime-cycle"),
                         script.index('wake "CrewQuay Muse work ready'))
+        for forbidden in ("host-wakeup-prepare","outbox-drain --once",
+                          "social-sync --if-idle-due","deployment-ensure",
+                          "platform-auth-bootstrap","wakeup-ack --result"):
+            self.assertNotIn(forbidden,script)
         self.assertIn("requires_host_receipt",Path(__file__).resolve().parents[1].joinpath(
             "patrol/components/host/components/bridge.py").read_text(encoding="utf-8"))
         self.assertNotIn('wakeup-ack --result accepted',script)
