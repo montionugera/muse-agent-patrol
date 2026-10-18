@@ -107,6 +107,7 @@ class MuseConsumer:
                 "wakeup_id":wakeup_id,"wakeup_generation":generation,
                 "source_type":wake["source_type"],
                 "promise":self._public_promise(promise) if promise else None,
+                "untrusted_promise_text":promise["text"] if promise else None,
                 "host_capability":mode,
                 "host_accepted_verified":mode=="reliable_ack",
                 "checkpoint":activity["checkpoint"],
