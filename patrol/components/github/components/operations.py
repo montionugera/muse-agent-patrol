@@ -12,8 +12,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-from ...setup.components.manifest import Manifest
-from ...setup.components.secrets import read_secret, private_dirs, SecretUnavailable
+from ...setup.index import Manifest, read_secret, private_dirs, SecretUnavailable
 from .transport import GitHubAPI
 
 _KEY=re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$")
