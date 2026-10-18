@@ -93,7 +93,7 @@ exec 9>&-
 # wakeup lease until an operator confirms that the host wake + ack bridge
 # is actually installed and has a verifiable acceptance contract.
 if [[ "${CREWQUAY_HOST_WAKEUP_WIRED:-0}" != "1" ]]; then
-  silent "host wake bridge not wired; polling and outbox completed" '{"status":"poll_only"}'
+  silent "BLOCKED_HOST_WAKE: host bridge not wired; polling and outbox completed" '{"status":"BLOCKED_HOST_WAKE"}'
   exit 0
 fi
 if ! type wake >/dev/null 2>&1; then
@@ -128,7 +128,10 @@ if [ "$DECISION" = "wake" ]; then
   # The host must explicitly acknowledge delivery with wakeup-ack and a
   # verifiable receipt. Return/exit from wake() is NOT proof of acceptance.
   # An unacknowledged lease expires to unknown, never blind redelivery.
-  wake "durable CrewQuay activity reserved" "$PREPARED"
+  # Host receives the opaque reserved handoff. A real host acceptance
+  # contract must call wakeup-ack, then its Muse Agent calls muse-consume.
+  # This Hook never writes a fictional 'accepted' receipt.
+  wake "CrewQuay Muse work ready: verify host acceptance then run muse-consume with the wakeup_id and lease_version from the handoff; fence all actions and require confirmed Outbox before muse-finish" "$PREPARED"
 else
   silent "no due unleased wakeup intent" '{"status":"idle"}'
 fi
