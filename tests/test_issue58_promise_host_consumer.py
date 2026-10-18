@@ -101,6 +101,18 @@ class PromiseHostConsumerTests(unittest.TestCase):
         self.assertEqual(self.db.read(
             "SELECT status FROM work_items WHERE id=?",(pack["work_id"],))[0]["status"],"done")
 
+    def test_linked_human_promise_reliable_requires_real_ack(self):
+        p,notice,gen,pack=self.start("human_action","reliable_ack","human-ack")
+        self.assertGreater(pack["work_lease_version"],0)
+        self.assertEqual(self.finish(notice,gen,pack)["status"],"finished")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM promises WHERE id=?",(p,))[0]["status"],"done")
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",
+            (pack["work_id"],))[0]["status"],"done")
+        with self.assertRaises(StaleLease):
+            self.finish(notice,gen,pack)
+
     def test_standalone_research_promise_reliable_requires_real_ack(self):
         p,notice,gen,pack=self.start("research","reliable_ack","research")
         self.assertEqual(pack["work_lease_version"],0)
