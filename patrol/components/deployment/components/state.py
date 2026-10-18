@@ -67,9 +67,14 @@ class Deployment:
             run_id = "deploy-" + secrets.token_hex(16)
             nonce = secrets.token_hex(16)
             ident = new_id()
+            # SYN is a time-sensitive control task, but still competes
+            # under ordinary Scheduler EDF/aging rules. A bounded start_by
+            # gives it urgency without a generic --for-work-id priority
+            # override. The platform's 300s challenge window starts only
+            # after SYN is sent, so this is an execution target, not expiry.
             wid = enqueue_tx(c, "deployment:syn:" + run_id, "human_action",
                 {"reason": "start authenticated deployment handshake", "deployment_run_id": ident},
-                now, priority=75)
+                now, priority=75, start_by=now+120)
             c.execute("""INSERT INTO deployment_runs
                 (id,actor,run_id,nonce,handshake_id,repo_sha,state,created_at,
                  updated_at,syn_work_id)

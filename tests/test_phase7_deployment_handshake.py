@@ -96,6 +96,36 @@ class DeploymentTests(unittest.TestCase):
             "messageId":"synack2","createdAt":iso(1008)}
         Sync(self.db).page("agent_events","global","stream-id",[event],"3",1008)
 
+    def test_syn_deadline_admission_obeys_priority_guard(self):
+        # A real deployment SYN is time-sensitive, but an explicit work
+        # selection never bypasses still-higher-priority work.
+        syn=self.run["syn_work_id"]
+        row=self.db.read("SELECT priority,start_by FROM work_items WHERE id=?",
+                         (syn,))[0]
+        self.assertEqual(row["priority"],75)
+        self.assertEqual(row["start_by"],1120)
+        background=self.queue.enqueue("deployment:test-background","human_action",
+            {"reason":"ordinary background"},1000,priority=90)
+        self.scheduler.sync_work(1001)
+        assessment=self.scheduler.assess(1001)
+        self.assertEqual(assessment["candidate"]["work_id"],syn)
+        self.assertNotEqual(assessment["candidate"]["work_id"],background)
+
+        truly_urgent=self.queue.enqueue("deployment:test-urgent","human_action",
+            {"reason":"actual imminent work"},1001,priority=90,start_by=1005)
+        denied=self.scheduler.dispatch("worker",1001,for_work_id=syn)
+        self.assertFalse(denied["granted"],denied)
+        self.assertEqual(denied["hint_status"],"outscored_by_other_activity")
+        self.assertEqual(denied["candidate"]["work_id"],truly_urgent)
+        self.assertIsNone(self.scheduler.assess(1001)["running"])
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='done' WHERE id=?",
+                      (truly_urgent,))
+        admitted=self.scheduler.dispatch("worker",1002,for_work_id=syn)
+        self.assertTrue(admitted["granted"],admitted)
+        claim=self.queue.claim_specific(syn,"worker",1003,{"authorized":"test"})
+        self.assertEqual(claim["scheduler_activity_id"],admitted["activity"]["id"])
+
     def test_successful_protocol_remains_host_unverified(self):
         self.begin()
         self.record_event()

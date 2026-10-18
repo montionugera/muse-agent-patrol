@@ -16,7 +16,7 @@
 下例中的 `cq` 为 `python -m patrol` 的受信任命令包装。所有 `--owner` 均填写真实 HATCH 唤醒后的 Worker ID，**不是平台 Actor**。
 
 1. **启动**：`cq deployment-start --repo-sha ACTUAL_GIT_SHA`。返回 `id`（本地 run ID）、`run_id`（平台唯一 runId）、`syn_work_id`。此操作只做能力发现和本地排队，不发送 SYN。
-2. **被现有 Hook 自然唤醒后**，Agent 在当前任务工作中运行 `cq schedule-next --owner WORKER --for-work-id SYN_WORK_ID`，确认 `granted=true`，再运行 `cq work-claim SYN_WORK_ID --owner WORKER --authorization-evidence /PRIVATE/auth.json`。用 **同一**活动 id / owner / generation 执行：
+2. **被现有 Hook 自然唤醒后**，Agent 在当前任务工作中运行 `cq schedule-next --owner WORKER --for-work-id SYN_WORK_ID`，确认 `granted=true`；若返回 `granted=false` 且 `hint_status=outscored_by_other_activity`，应让 Agent/Planner 正常处理更高优先级的候选任务或等待合法安全点，随后重试，**不能强制指定 work ID 绕过优先级**。SYN 工作由客户端赋予 120 秒 `start_by` 时效目标，通过统一 Scheduler 的 EDF 优先级参与竞争，不保证无条件立即获批。获得时间片后再运行 `cq work-claim SYN_WORK_ID --owner WORKER --authorization-evidence /PRIVATE/auth.json`。用 **同一**活动 id / owner / generation 执行：
    ```bash
    cq deployment-stage-syn DEPLOYMENT_ID --owner WORKER \
      --schedule-id LIVE_ACTIVITY_ID --schedule-generation LIVE_GENERATION
