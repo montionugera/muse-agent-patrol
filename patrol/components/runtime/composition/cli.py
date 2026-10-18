@@ -26,6 +26,7 @@ from ...transport.index import Client, credential_provider
 from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
 from .scheduler import Tick
+from .cycle import RuntimeCycle
 
 
 def timestamp(value):
@@ -180,6 +181,9 @@ def parser():
     a.add_argument("--activity-generation",type=int,required=True)
     a.add_argument("--work-lease-version",type=int,required=True)
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("runtime-cycle")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--host-capability",choices=("best_effort","reliable_ack","unavailable"),default="best_effort")
     a=sub.add_parser("host-wakeup-prepare")
     a.add_argument("--host-capability",choices=("best_effort","reliable_ack","unavailable"),
                    default="reliable_ack",
@@ -274,6 +278,14 @@ def main(argv=None):
     args=parser().parse_args(argv)
     try:
         cfg=load_config(args.config,database=args.db)
+        if args.command=="runtime-cycle":
+            # The coordinator is the parent of phase CLIs, so it must NOT hold
+            # the phase-level SQLite .tick.lock across child invocations.
+            result=RuntimeCycle(args.config,cfg.database).run(args.owner,args.host_capability)
+            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+            # Degraded compensation must not suppress a valid urgent Host wake
+            # advice; the native Hook can inspect independent phase failures.
+            return 0
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
             if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare") and not Path(cfg.database).is_file():
@@ -322,13 +334,13 @@ def main(argv=None):
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
             elif args.command in ("deployment-start","deployment-ensure"):
-                # Called by the existing HATCH Hook once per installed SHA.
-                # All subsequent turns use local status and never issue a
-                # capability GET or generate duplicate runs/work.
+                # Agent-owned lifecycle command, never the repeating HATCH
+                # Hook. Ordinary Git SHA upgrades are not new deployment runs.
                 bound=db.read("SELECT value FROM meta WHERE key='actor'")
                 current=Deployment(db).get() if bound else None
                 if (args.command=="deployment-ensure" and current and
-                        current.get("repo_sha")==args.repo_sha):
+                        current.get("status")!="not_started" and
+                        current.get("state") not in ("failed","expired")):
                     result={"status":"already_initialized","deployment":current,
                             "remote_action_issued":False}
                 elif not bound:

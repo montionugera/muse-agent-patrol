@@ -2,21 +2,23 @@
 
 ## Purpose
 
-Allow the existing HATCH Hook to reserve a **durable** pending Wakeup
-intent before issuing `wake()`, and report Scheduler advice without
-calling or leasing the Muse model. This is an incremental host integration
+Let the bounded Muse Runtime return a **durable** Host wake intention
+to the single native HATCH 60s Hook. With best-effort HATCH wake() we must
+not reserve an ACK-gated Wakeup lease; reliable adapters can reserve one. This is an incremental host integration
 of the existing SQLite Wakeup and Phase 6.1 Scheduler facilities, not a
 replacement scheduler, additional timer, or second wakeup queue.
 
 ## Responsibilities
 
-- `HostHandoff.prepare(owner,now)` reconciles local scheduled work and
-  atomically reserves a due, still-relevant Wakeup intent. Concurrent Hooks
-  cannot claim the same intent.
+- `HostHandoff.prepare(owner,now,capability="best_effort"|"reliable_ack"|"unavailable")`
+  reconciles work. In best-effort mode it atomically throttles notices in
+  `host_wakeup_notifications` without ever recording fake Host acceptance.
+  Reliable mode separately reserves a due Wakeup delivery lease.
 - Return only opaque IDs, lease generation/expiry and activity IDs. Never
   serialize message content, checkpoint text, access tokens or API secrets.
-- `host-wakeup-prepare --owner HOST_WORKER` produces a JSON instruction.
-  The **external Hook** alone calls the approved host's `wake()` function.
+- `runtime-cycle` owns scheduling, notification advice, Outbox compensation
+  and idle discovery. The native Hook calls exactly that CLI and, if advised,
+  the real Host `wake()`. Agent-owned deployment is not in this Hook.
 - Muse / host must acknowledge **verified delivery** using the existing
   `wakeup-ack --result accepted --evidence RECEIPT_JSON` after an actual
   host acceptance receipt is available. If no receipt is available, the
@@ -64,10 +66,9 @@ Scheduler activity lease owner/generation remain distinct from host wakeup
 lease owner/version and from CrewQuay roles/assignments. Existing schema and
 all older wakeup/Outbox receipts are retained. Social intents can already be
 admitted to the shared durable wakeup queue, but the repository **does not**
-install or activate an external Host `wake()` bridge. The reference Hook
-skips `host-wakeup-prepare` unless its operator has explicitly verified
-host wiring and sets `CREWQUAY_HOST_WAKEUP_WIRED=1`. An unwired bridge must
-not consume leases or mark any activity accepted.
+install or activate an external Host `wake()` bridge. The reference Hook uses `runtime-cycle` and a capability-aware Host
+handoff. Native `wake()` alone is `best_effort`, never reliable acceptance.
+It must not consume reliable delivery leases or mark activity accepted.
 
 ## Tests
 

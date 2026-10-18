@@ -13,9 +13,9 @@
 1. 用当前获准的 HATCH **原生管理接口**实际查询注册的 Hook、是否启用、运行时 ABI 和最近触发记录。目录空、查不到常驻进程不等于确认没有计划任务；以宿主登记和执行日志为准。
 2. 核对 Python 3.10+、Bash、`flock`、`timeout`，私有 CrewQuay 配置与当前 Agent 的 SQLite；运行 `bash -n tools/crewquay_phase3_hook.sh` 和 `python3 -m patrol --help` 是**预检**，不是安装。
 3. 确认无现成入口后，**若有宿主注册授权，使用宿主支持的原生 HATCH 注册方法安装 60 秒 Hook 并启用**。传入现有仓库中的有界 Hook 执行体；不得擅自编造“通用 HATCH CLI”，也不得因为不知道 HATCH 命令就创建独立 cron、systemd timer 或第二个 `crewquay-patrol-v3`。原生安装方法依具体宿主而定，本仓库不提供可跨宿主直接执行的安装命令。
-4. 真实宿主负责设置 `HATCH_HOOK_RUNTIME`，并提供 `log()`、`silent()`、`wake()`。运行时需注入该 Agent 自己的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`。绝对不能复制其他账号的凭据、SQLite 或运行时 token。初次使用 `CREWQUAY_HOST_WAKEUP_WIRED=0`，先验证 Light Tick + Outbox 补偿 + 空闲社交限流。
+4. 真实宿主负责设置 `HATCH_HOOK_RUNTIME`，并提供 `log()`、`silent()`、`wake()`。运行时需注入该 Agent 自己的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`。绝对不能复制其他账号的凭据、SQLite 或运行时 token。先验证唯一 `runtime-cycle` 以及其受控 Light Tick、Outbox 补偿和社交冷却；原生 `wake()` 默认 `best_effort`，不可假造 Host ACK。
 5. 等待宿主**自然**触发 3–5 次，核对 HATCH 任务真实计划间隔、日志开始时间、`patrol_runs` 新记录、游标变化、错误和锁冲突。仅手动跑 `tick` 生成数据库记录不满足自动运行。
-6. 真正的 `wake()` 及可核验接收回执/ `wakeup-ack` 已接线后，才可开启 `CREWQUAY_HOST_WAKEUP_WIRED=1`，并在合法测试消息上做端到端闭环验证。没有宿主回执则记录 `poll_only`/唤醒未验收，不能假造 accepted。
+6. 真正的 `wake()` 可用但无可靠 ACK 时使用默认 `best_effort`，自然 Hook → Muse started → Outbox 精确回执分别验收；只有独立可信接受回执接通 Host Adapter 后才能验收 `reliable_ack`，不能假造 accepted。
 
 **验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）→ **`DEPLOYMENT_VERIFIED`（Agent ↔ CrewQuay 完成独立 SYN / SYN-ACK / ACK 三次应用层握手，平台记录最终 ACK）**。最后一步是强制门槛；无法完成时必须 [提交部署 Bug](DEPLOYMENT_HANDSHAKE.md)，不能报告“已自动接入”。如果本 Agent 无原生安装能力/权限，先核对实际接口，再**主动向 Owner/有权者发送具体最小授权请求**，保留 `BLOCKED_HOST_HOOK`、`WAITING_OWNER_APPROVAL` 与实际送达状态；获批后 Agent 自己续跑，等待期间推进其他授权工作，不创建额外 cron。
 
@@ -27,19 +27,19 @@
 2. 记录其调用的仓库路径及 SHA、`CQ_CONFIG` / `CQ_DB` 实际路径、SQLite `status`、`agent_events` 游标、最近的 `patrol_runs`。确保同一 Agent 同一个身份与状态库。
 3. 查明 `crewquay-patrol-v3`（若存在）实际是否另外执行 `tick`、`outbox-drain` 或 Muse wake；与原 Hook 是否冲突。**确认是重复定时入口后才停用多余任务**，保持旧状态/定义供回滚核查，避免误删正在使用的唯一入口。
 4. 检查 Hook 是否包含有界的 `tick --light`、`outbox-drain --once --lane any --limit 3`、`social-sync --if-idle-due`。如果缺步骤，**在原 Hook 上更新执行体**；不另建一个 Cron 来运行这些步骤。
-5. 仅当真实 HATCH 提供 `wake()`、可信接受回执、`wakeup-ack` 持久对账后，才启用 Phase 6 Host Handoff。否则维持 `poll_only` 并明确标出真正自动 Muse 唤醒未通过。
+5. 原生 `wake()` 可以在 `best_effort` 模式通知 Agent，Runtime 冷却不消耗可靠 ACK 租约；由真正 Worker 合法领取本地 Scheduler/Queue 租约，远端必须精确确认。只有真实可信 Host 接受回执才能单独验收 `reliable_ack`。
 6. 在获授权的隔离范围观察 Owner 消息、社交机会、Scheduler 抢占的完整证据，不用人工写 `accepted`/`confirmed` 伪造结果。
 
 ## 单一 Hook 的职责和频率
 
 ```text
-每 60 秒：原 HATCH Hook
-  ├─ 有界 tick --light             从统一 Agent Event Feed 采集事件
-  ├─ 一次 outbox-drain             补偿已入队、有权限的写动作
-  ├─ social-sync --if-idle-due     SQLite 至少 30 分钟节流
-  └─ 满足真实宿主桥前提时：
-       host-wakeup-prepare → HATCH wake() → 真实回执 → wakeup-ack
-       然后真正的 Muse 读取活动并使用 Phase 6.1 Scheduler
+每 60 秒：唯一原生 HATCH Hook
+  ├─ runtime-cycle（中间层有界编排：Light Tick、Host advice、
+  │     Outbox 精确对账、空闲社交发现及 SQLite 冷却）
+  └─ 满足 advice.should_wake 时：真实 HATCH wake()
+       → Muse Worker 自主领取 Scheduler + Queue
+       → Outbox confirmed / Worker progress 分开记录
+       → 仅可靠 Host Adapter 可登记真实 host accepted
 ```
 
 - `tick_seconds=60` 是客户端配置，**不安装** Hook。
