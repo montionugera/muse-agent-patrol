@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS outbox(
  payload_hash TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
  next_attempt_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
  remote_id TEXT, result TEXT, error TEXT, dispatch_owner TEXT, dispatch_at REAL,
- verify_cursor TEXT NOT NULL DEFAULT '0');
+ verify_cursor TEXT NOT NULL DEFAULT '0', verified_at REAL);
 -- Agent workers draft actions, but only the verified CrewQuay actor may send.
 -- Separate immutable production provenance avoids treating a Hook worker
 -- name as a platform execution identity. Safe additive table for old v1 DBs.
@@ -260,6 +260,11 @@ class Database:
             if "voluntary_yield_streak" not in schedule_cols:
                 c.execute("ALTER TABLE schedule_activities "
                           "ADD COLUMN voluntary_yield_streak INTEGER NOT NULL DEFAULT 0")
+            # Verification time is a local exact readback, never a guessed remote time.
+            # Preserve historical confirmed rows as NULL on additive upgrade.
+            outbox_cols={x["name"] for x in c.execute("PRAGMA table_info(outbox)")}
+            if "verified_at" not in outbox_cols:
+                c.execute("ALTER TABLE outbox ADD COLUMN verified_at REAL")
             # Execution receipts are deliberately separate from host delivery
             # leases. Create only AFTER the older wakeup-table rebuild, so
             # v1 -> v2 migration does not drop a referenced parent table.
