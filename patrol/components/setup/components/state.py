@@ -240,14 +240,28 @@ class Setup:
     def skip_optional(self,step):
         if step not in _ORDER or self._required(step):
             raise ValueError("cannot skip a required or unknown setup step")
+        # Optional subsystems are indivisible dependencies: skipping the
+        # optional PAT credential also skips repository/permission probes.
+        # Otherwise a disabled GitHub integration would block Setup forever.
+        if step.startswith("github_"):
+            group=("github_credential","github_repositories","github_permissions")
+        elif step.startswith("crewquay_") or step=="deployment_handshake":
+            group=("crewquay_identity","crewquay_scopes","deployment_handshake")
+        else:
+            group=(step,)
+        if any(self._required(x) for x in group):
+            raise ValueError("cannot disable a required setup dependency")
         c=self._connect()
         try:
             now=self.clock()
             with c:
-                self._set(c,step,{"status":"skipped_optional","reason":"OPTIONAL_DEFERRED",
-                                 "next_action":"none"},now)
-            return {"step":step,"status":"skipped_optional",
-                    "grants_changed":False,"remote_action_issued":False}
+                for name in group:
+                    self._set(c,name,{"status":"skipped_optional",
+                                      "reason":"OPTIONAL_DEFERRED",
+                                      "next_action":"none"},now)
+            return {"step":step,"skipped_steps":list(group),
+                    "status":"skipped_optional","grants_changed":False,
+                    "remote_action_issued":False}
         finally:
             c.close()
 
