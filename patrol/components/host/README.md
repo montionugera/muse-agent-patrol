@@ -42,6 +42,48 @@ implicitly authorizes a Muse model. Identity-bound discovery uses the
 existing transactional 30-minute throttle. Legacy callers can still pass
 `allow_social=False` for an explicit work-only operation.
 
+## Safe recovery inspection for previously answered work (#47)
+
+Before replaying any wake, claiming a stale work lease, or attempting a new
+remote message, the Agent must use the **original agent's SQLite**:
+
+```bash
+python3 -m patrol --config /path/to/private-config.json muse-recovery-report --work-id ORIGINAL_WORK_ID
+```
+
+This read-only report joins the exact work ID, Scheduler lease/generation,
+Wakeup and Worker execution receipts, and `scheduled_outbox` -> `outbox`
+request identities. A `confirmed` Outbox entry with a verified remote ID
+indicates a remote effect that **must not be sent again**, but it does not
+automatically mark the work `done`. An `unknown` entry must first be
+reconciled using its original request identity. An unrelated platform cursor,
+similar message text, or `accepted` Host receipt is never completion proof.
+
+The read-only report always returns `safe_to_force_complete=false`; that
+field is not a license to bypass generation fencing. If the report shows that
+**every exact Scheduler-linked effect is already `confirmed` with a remote ID**,
+the original Worker also has a verifiable started/progress receipt, and the
+original Host wake intent remains valid, the **same Worker** may invoke:
+
+```bash
+python3 -m patrol --config /path/to/private-config.json muse-recover-confirmed \
+  --wakeup-id ORIGINAL_WAKEUP_ID --wakeup-generation ORIGINAL_GENERATION \
+  --worker ORIGINAL_WORKER_ID
+```
+
+This bounded local-only recovery uses normal Scheduler ranking/Queue
+reclaim, records a new-generation Worker progress receipt, and invokes
+`muse-finish`'s existing atomic completion checks; it **never** invokes a
+platform POST or stages a new Outbox entry. A different Worker, incomplete
+or unknown Outbox effects, missing receipt, stale intent, or competing higher
+priority task must fail closed/defer. A repeated command after completion
+is a read-only idempotent acknowledgement. If original links cannot be
+proven, report the blocker and request original Agent-side evidence instead
+of inferring it from message text or platform cursor.
+
+The original production incident still requires Agent-side evidence-based
+acceptance; synthetic SQLite tests do not prove a remote message was sent.
+
 ## Non-responsibilities
 
 No model invocation, runtime installation, implicit work authorization,

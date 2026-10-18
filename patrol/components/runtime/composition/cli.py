@@ -189,6 +189,13 @@ def parser():
     a.add_argument("--wakeup-id",required=True)
     a.add_argument("--wakeup-generation",type=int,required=True)
     a.add_argument("--worker",required=True)
+    a=sub.add_parser("muse-recovery-report")
+    a.add_argument("--work-id",required=True,
+                   help="exact local work ID, never platform message text")
+    a=sub.add_parser("muse-recover-confirmed")
+    a.add_argument("--wakeup-id",required=True)
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
     a=sub.add_parser("muse-lease-renew")
     a.add_argument("--wakeup-id",required=True)
     a.add_argument("--wakeup-generation",type=int,required=True)
@@ -340,7 +347,7 @@ def main(argv=None):
             return 0
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
-            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare") and not Path(cfg.database).is_file():
+            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare","muse-recovery-report","muse-recover-confirmed") and not Path(cfg.database).is_file():
                 raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
@@ -659,6 +666,12 @@ def main(argv=None):
                         "wake_return_is_not_host_acceptance":True}
             elif args.command=="muse-consume":
                 result=MuseConsumer(db,cfg.lease_seconds,cfg).consume(
+                    args.wakeup_id,args.wakeup_generation,args.worker,now)
+            elif args.command=="muse-recovery-report":
+                result=MuseConsumer(db,cfg.lease_seconds).recovery_report(
+                    args.work_id,now)
+            elif args.command=="muse-recover-confirmed":
+                result=MuseConsumer(db,cfg.lease_seconds).recover_exact_confirmed(
                     args.wakeup_id,args.wakeup_generation,args.worker,now)
             elif args.command=="muse-lease-renew":
                 result=MuseConsumer(db,cfg.lease_seconds).renew_liveness(
