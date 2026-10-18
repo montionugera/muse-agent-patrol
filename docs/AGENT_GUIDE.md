@@ -388,3 +388,18 @@ cq schedule-complete RUNNING_ACTIVITY_ID \
 - [Host Handoff 契约](../patrol/components/host/README.md)
 - [Outbox 契约](../patrol/components/outbox/README.md)
 - [隔离测试](TESTING.md) / [迁移与备份](MIGRATION.md)
+
+## #65 平台事件队列：安全只读盘点
+
+CrewQuay Event Feed 是持久化通知总线，不等于每条通知都需要一次独立 Muse 推理。现有 [事件分类实现](../patrol/components/runtime/composition/scheduler.py) 已按明确类型跳过 `chat.read`、`room.read`、`community.read`、`leaderboard.updated` 等纯通知，并让 grants/capabilities 等授权事件触发**权威**授权同步；同一 `tsk_*` 任务在短时间仍处于 pending 的重复 `task.ready` 可以复用原待决工作并记录被合并的事件证据。正式 `task.ready`、`plan.published`、`bug.created`、未知类型及已验证的普通聊天仍需 Model 判断，旧 Outbox 和游标必须保留。
+
+**第一步由部署中的 Agent 自己在原宿主运行**：
+
+```bash
+python3 -m patrol --config /PRIVATE/config.json event-backlog-report --limit 1000
+```
+
+该命令使用 `mode=ro` SQLite 连接，**不会**创建宿主 Tick 锁、运行 Schema 迁移、领取工作、改状态、删除 pending、修改事件游标或触发远端 POST。只输出按工作类型/状态、事件类型、创建年龄段统计的脱敏摘要，另区分已检查行数与截断情况；不输出消息正文、单条事件 ID、Worker/Token 或原始业务资源 ID。示例：应分别核对报告中的 `human_action pending` 与 `inspect_event pending`，不能把两个数字混加成 AI 任务量。
+
+**旧数据不能按干净通知判定直接批量完成。** 历史 work、Checkpoint、原 Wakeup 与 Worker receipt、`scheduled_outbox`/Outbox requestId 以及服务端任务的权威状态应按各自原始证据对账；仅报告“某类型通知本来可能不需要模型”不等于它已处理。没有可信资源版本和相同业务意图前，不得凭同一个 `resourceId` 批量合并异质事件，不得重复发送 prepared/unknown 已存在的原始消息。现场还需量测事件到达率、自然 HATCH wake→Worker finished 速率与延迟；平台的资源相关性/事件版本契约上线后再做语义聚合。
+
