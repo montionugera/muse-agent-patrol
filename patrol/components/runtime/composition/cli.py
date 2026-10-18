@@ -283,7 +283,9 @@ def main(argv=None):
             # the phase-level SQLite .tick.lock across child invocations.
             result=RuntimeCycle(args.config,cfg.database).run(args.owner,args.host_capability)
             print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
-            return 0 if result["status"]=="ok" else 1
+            # Degraded compensation must not suppress a valid urgent Host wake
+            # advice; the native Hook can inspect independent phase failures.
+            return 0
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
             if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare") and not Path(cfg.database).is_file():
