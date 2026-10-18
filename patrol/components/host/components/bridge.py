@@ -30,9 +30,14 @@ class HostHandoff:
         social_id=decision["candidate"]["id"] if social_eligible else None
         if social_id:
             self.wakeups.stage_social(now,social_id)
+        # Do not wake a lower-ranked work item while Scheduler would deny
+        # its for-work-id dispatch. Preemption is checkpointed, not stolen.
+        focus_work=(decision["candidate"]["work_id"]
+                    if decision["candidate"] and
+                       decision["candidate"]["kind"]=="work" else None)
         leased=self.wakeups.claim_next(
             owner,now,allow_social=social_eligible,
-            social_activity_id=social_id)
+            social_activity_id=social_id,focus_work_id=focus_work)
         if leased is None:
             return {"should_wake":False,"host_called":False,
                     "status":"idle","activity_dispatched":False,
