@@ -302,13 +302,11 @@ class Scheduler:
     def dispatch(self,owner,now,for_work_id=None):
         """Refresh actionable work then grant the top eligible time slice.
 
-        An optional work ID explicitly requests that specific work item.
-        If the requested work is eligible (registered, active, due), it is
-        granted directly without comparing against higher-priority candidates.
-        This supports programmatic flows (e.g., deployment handshake) that
-        require a specific work item. If the requested work is not eligible,
-        the reason is reported and nothing is granted. An active lease must
-        yield or expire normally.
+        An optional work ID is a *selection guard*, not a priority or
+        authorization override. An active lease must yield or expire normally.
+        If a different candidate outranks the requested work, report why and
+        leave it untouched. This prevents an operator from accidentally
+        claiming a low-priority activity while replying to urgent messages.
         """
         if not isinstance(owner,str) or not 1<=len(owner)<=128:
             raise ValueError("nonempty bounded worker owner required")
@@ -357,20 +355,18 @@ class Scheduler:
             if best is None or (for_work_id is not None and selected is None):
                 return {**view,**info,"granted":False,
                         "lease_recovered":expired,"activities_registered":refreshed}
-            # When a specific work ID is explicitly requested and eligible,
-            # grant it directly. The "outscored" guard was meant to prevent
-            # accidental claims during interactive use, but it blocks
-            # legitimate programmatic flows (e.g., deployment handshake)
-            # that require a specific work item.
-            target=selected if (for_work_id is not None and selected is not None) else best
+            if for_work_id is not None and selected["id"]!=best["id"]:
+                return {**view,**info,"granted":False,
+                        "hint_status":"outscored_by_other_activity",
+                        "lease_recovered":expired,"activities_registered":refreshed}
             n=c.execute("""UPDATE schedule_activities SET status='running',
                 lease_owner=?,lease_version=lease_version+1,
                 lease_until=?,slice_until=?,last_started_at=?,
                 last_charged_at=?,preempt_requested=0,preempt_mode=NULL,
                 preempt_reason=NULL,last_updated=?
                 WHERE id=? AND status IN ('ready','suspended')""",
-                (owner,now+self.lease_seconds,now+min(quantum(target["weight"]),self.lease_seconds-1.0),
-                 now,now,now,target["id"])).rowcount
+                (owner,now+self.lease_seconds,now+min(quantum(best["weight"]),self.lease_seconds-1.0),
+                 now,now,now,best["id"])).rowcount
             if n!=1:
                 raise StaleLease("another scheduler dispatched this activity")
             active=self._current(c)
