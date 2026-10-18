@@ -587,7 +587,7 @@ def main(argv=None):
                         "deployed_handshake_is_not_execution_readiness":True,
                         "host_attestation_required":True}
             elif args.command=="muse-consume":
-                result=MuseConsumer(db,cfg.lease_seconds).consume(
+                result=MuseConsumer(db,cfg.lease_seconds,cfg).consume(
                     args.wakeup_id,args.wakeup_generation,args.worker,now)
             elif args.command=="muse-finish":
                 result=MuseConsumer(db,cfg.lease_seconds).finish(
