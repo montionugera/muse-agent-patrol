@@ -6,6 +6,60 @@
 # runs the model. Each Agent supplies ITS OWN config, DB and Host runtime.
 set -euo pipefail
 
+# Native HATCH registrations without CREWQUAY_* use a private, data-only
+# binding beside THIS installed canonical script. No old Hook is ever sourced.
+if [ -z "${CREWQUAY_REPO:-}" ] || [ -z "${CREWQUAY_DB:-}" ] || \
+   [ -z "${CREWQUAY_CONFIG:-}" ] || [ -z "${HATCH_HOOK_RUNTIME:-}" ]; then
+  BINDING="${BASH_SOURCE[0]}.binding.json"
+  BOUND="$(python3 - "$BINDING" <<'PY'
+import json, os, pathlib, stat, sys
+try:
+    p=pathlib.Path(sys.argv[1])
+    info=p.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid()
+        or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>4096):
+        raise ValueError()
+    data=json.loads(p.read_text(encoding="utf-8"))
+    names=("agent_id","host_id","repo","db","config","hatch_runtime")
+    if (not isinstance(data,dict)
+        or set(data)!={"schema_version",*names}
+        or type(data["schema_version"]) is not int or data["schema_version"]!=1):
+        raise ValueError()
+    if not all(isinstance(data[k],str) and data[k] and len(data[k])<=1024
+               and not any(ord(c)<32 for c in data[k]) for k in names):
+        raise ValueError()
+    paths=("repo","db","config","hatch_runtime")
+    if not all(pathlib.Path(data[k]).is_absolute() for k in paths):
+        raise ValueError()
+    cfg=json.loads(pathlib.Path(data["config"]).read_text(encoding="utf-8"))
+    if (not isinstance(cfg,dict) or cfg.get("actor_id")!=data["agent_id"]
+        or not isinstance(cfg.get("database"),str)
+        or pathlib.Path(cfg["database"]).resolve()!=pathlib.Path(data["db"]).resolve()):
+        raise ValueError()
+    if not pathlib.Path(data["repo"]).is_dir() or not all(
+        pathlib.Path(data[k]).is_file() for k in ("db","config","hatch_runtime")):
+        raise ValueError()
+    for k in paths:
+        print(data[k])
+except (OSError,ValueError,TypeError,KeyError,UnicodeError):
+    sys.exit(2)
+PY
+  )" || { printf '%s\n' 'Muse Hook: missing/invalid private Agent binding' >&2; exit 2; }
+  mapfile -t _agent_binding <<< "$BOUND"
+  [ "${#_agent_binding[@]}" -eq 4 ] || exit 2
+  values=( "${CREWQUAY_REPO:-}" "${CREWQUAY_DB:-}" "${CREWQUAY_CONFIG:-}" "${HATCH_HOOK_RUNTIME:-}" )
+  for n in 0 1 2 3; do
+    if [ -n "${values[$n]}" ] && [ "${values[$n]}" != "${_agent_binding[$n]}" ]; then
+      printf '%s\n' 'Muse Hook: conflicting Agent binding and HATCH environment' >&2
+      exit 2
+    fi
+  done
+  CREWQUAY_REPO="${_agent_binding[0]}"
+  CREWQUAY_DB="${_agent_binding[1]}"
+  CREWQUAY_CONFIG="${_agent_binding[2]}"
+  HATCH_HOOK_RUNTIME="${_agent_binding[3]}"
+fi
+
 REPO="${CREWQUAY_REPO:?Agent-specific repository path required}"
 DB="${CREWQUAY_DB:?Agent-specific SQLite path required}"
 CONFIG="${CREWQUAY_CONFIG:?Agent-specific runtime config path required}"

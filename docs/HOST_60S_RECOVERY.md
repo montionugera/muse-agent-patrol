@@ -30,6 +30,45 @@
 5. 原生 `wake()` 可以在 `best_effort` 模式通知 Agent，Runtime 冷却不消耗可靠 ACK 租约；由真正 Worker 合法领取本地 Scheduler/Queue 租约，远端必须精确确认。只有真实可信 Host 接受回执才能单独验收 `reliable_ack`。
 6. 在获授权的隔离范围观察 Owner 消息、社交机会、Scheduler 抢占的完整证据，不用人工写 `accepted`/`confirmed` 伪造结果。
 
+## #71 无 env HATCH：直接安装新 Hook，不运行旧代码
+
+生产实测：2026-10-18 旧注册不注入 CREWQUAY_*，此前新版 Hook 在 CREWQUAY_REPO 处连续失败约 12 分钟，导致 Tick/Outbox drain/wake 停止。宿主已回滚，保持回滚状态直到本节预检和真实自然触发验收成功。
+
+**不是绑定或兼容旧脚本。** 新 Hook 原位占用 HATCH 已登记的当前执行文件绝对路径；安装后这个文件的**全部内容就是 canonical `tools/crewquay_hatch_hook.sh`**，旧文件仅在私有备份中供回滚。无 env 时，它只读取紧邻新安装文件的 0600 `.binding.json`（数据，不是 Bash，不含 Token），独立找到当前 Agent 的 repo、SQLite、runtime 配置和真实 HATCH 原生 `log/silent/wake` 运行时文件。
+
+由 Agent 自己从真实 HATCH 管理接口核实**现有唯一任务 ID、实际脚本绝对路径、运行账户、60s 周期和变更权限**。工具接受的 task-id 是 Agent 断言，不能独立证明原生登记。绑定输入文件必须是当前用户的 0600 私有 JSON，且字段与该 Agent 的 runtime.json.actor_id/database 一致：
+
+```json
+{
+  "schema_version": 1,
+  "agent_id": "ACTUAL_ACTOR_ID",
+  "host_id": "ACTUAL_HATCH_INSTANCE",
+  "repo": "/absolute/own/repo",
+  "db": "/absolute/private/own.sqlite3",
+  "config": "/absolute/private/own/runtime.json",
+  "hatch_runtime": "/absolute/native/HATCH_RUNTIME.sh"
+}
+```
+
+`hatch_runtime` 必须由实际宿主提供、包含真实原生 `log/silent/wake` 能力，**不是旧 Hook 文件，也不能用虚构的 wake() 替代**。如果原生宿主根本不提供可调用的真实 Runtime，报告 `BLOCKED_HOST_NATIVE_WAKE_ADAPTER` 并保持生产回滚，不冒险切换。
+
+现有旧脚本实测曾为 770（组可写）。安全门仍有效：Agent 先确认真实任务归属和文件所有权，然后依法修正旧文件权限为 750/700；迁移器不会在组可写时强行覆盖。获取原文件**完整 SHA256**（不是前 8 位）。仅在环境/路径/身份预检均通过后使用：
+
+```bash
+python3 tools/hatch_direct_migrate.py plan --installed /ABS/REGISTERED/crewquay-wakeup.sh --expected-sha OLD_FULL_SHA256 --binding-spec /PRIVATE/agent-binding.json --native-task-id ORIGINAL_HATCH_TASK_ID --native-command-path /ABS/REGISTERED/crewquay-wakeup.sh
+python3 tools/hatch_direct_migrate.py apply --installed /ABS/REGISTERED/crewquay-wakeup.sh --expected-sha OLD_FULL_SHA256 --binding-spec /PRIVATE/agent-binding.json --native-task-id ORIGINAL_HATCH_TASK_ID --native-command-path /ABS/REGISTERED/crewquay-wakeup.sh
+```
+
+`apply` 在原路径直接安装**全新 canonical 可执行文件**，创建只给自身的绑定与迁移记录，私有保存旧文件供回滚；不会注册第二个 HATCH 任务、调用旧脚本、清空 SQLite/Outbox、重新部署握手。旧 `hatch_hook_manager.py sync` 对 unmanaged 的拒绝维持不变，**旧脚本的任何 ABI/Hook 逻辑均不参与新运行**。
+
+如自然 HATCH Tick 缺配置/未调用 Runtime/Worker 未被唤醒，按迁移输出的 canonical 全 SHA 回滚旧可执行文件：
+
+```bash
+python3 tools/hatch_direct_migrate.py rollback --installed /ABS/REGISTERED/crewquay-wakeup.sh --expected-sha NEW_CANONICAL_FULL_SHA256
+```
+
+要求实际宿主连续 3–5 次 **自然** 60 秒 Tick、真实 HATCH wake→同 ID/代次 Muse started/finished、必要时原 requestId 的 Outbox confirmed，才能视为成功。仅本地 Bash 语法通过或 drift audit `in_sync` 不是生产验收。既存 unknown reply 不重发、不更换键。
+
 ## #68 统一 Hook ABI、Agent 自助升级和漂移核验
 
 **所有 Agent 都执行一个源文件**：`$CREWQUAY_REPO/tools/crewquay_hatch_hook.sh`（标记 `MUSE_HATCH_HOOK_ABI=1`），并继续通过**本 Agent**的 `CREWQUAY_CONFIG` / `CREWQUAY_DB` / `HATCH_HOOK_RUNTIME` 与宿主 `wake()`。单台宿主可有多个不同 Actor，但每个 Agent 的 DB、原生注册和稳定锁必须隔离；默认互斥锁为 `$CREWQUAY_DB.hatch-hook.lock`，而非共享 `$HOME/hooks/state/...`。
