@@ -729,6 +729,53 @@ class PreemptiveSchedulerTests(unittest.TestCase):
             "SELECT status FROM work_items WHERE id=?",(stale,))[0]["status"],
             "pending")
 
+    def test_issue45_same_priority_aged_backlog_claim_survives_reconcile(self):
+        # Three equal-priority six-day-old tasks were repeatedly granted then
+        # instantly preempted by another equally old task before work-claim.
+        queue=Queue(self.db)
+        work_ids=[queue.enqueue("issue45:peer-"+str(i),"human_action",
+                    {"reason":"legitimate backlog"},1000,priority=45)
+                  for i in range(3)]
+        self.scheduler.sync_work(1000)
+        now=1000+6*86400
+        granted=self.scheduler.dispatch("worker",now)
+        self.assertTrue(granted["granted"],granted)
+        self.assertIn(granted["activity"]["work_id"],work_ids)
+        self.scheduler.reconcile(now+1)
+        active=self.scheduler.assess(now+1)["running"]
+        self.assertEqual(active["id"],granted["activity"]["id"])
+        self.assertFalse(active["preempt_requested"],active)
+        claim=queue.claim_specific(granted["activity"]["work_id"],
+                                   "worker",now+2,{"approved_by":"Owner"})
+        self.assertEqual(claim["scheduler_activity_id"],active["id"])
+        self.assertEqual(sum(x["status"]=="pending" for x in
+            self.db.read("SELECT status FROM work_items")),2)
+
+    def test_issue45_aged_running_credit_does_not_block_fresh_owner(self):
+        queue=Queue(self.db)
+        for i in range(3):
+            queue.enqueue("issue45:old-peer-"+str(i),"human_action",
+                          {"reason":"old backlog"},1000,priority=45)
+        self.scheduler.sync_work(1000)
+        now=1000+6*86400
+        active=self.scheduler.dispatch("worker-old",now)["activity"]
+        urgent=queue.enqueue("issue45:new-owner-dm","human_action",
+                             {"reason":"fresh Owner request"},now+1,
+                             priority=85)
+        decision=self.scheduler.reconcile(now+2)["decision"]
+        self.assertEqual(decision["candidate"]["work_id"],urgent)
+        self.assertTrue(decision["running"]["preempt_requested"],decision)
+        self.assertEqual(decision["preemption"],"medium_safe_point")
+        paused=self.scheduler.checkpoint(active["id"],"worker-old",
+                           active["lease_version"],now+3,
+                           {"phase":"yield to fresh Owner"})
+        self.assertTrue(paused["suspended"])
+        next_up=self.scheduler.dispatch("worker-owner",now+4,for_work_id=urgent)
+        self.assertTrue(next_up["granted"],next_up)
+        self.assertEqual(next_up["activity"]["work_id"],urgent)
+        queue.claim_specific(urgent,"worker-owner",now+5,
+                             {"approved_by":"Owner"})
+
     def test_imminent_deadline_protected_from_aged_nonurgent_activity(self):
         imminent=self.add("hard-due","work",now=1000,score=70,deadline=1015)
         waiting=self.add("old-background","maintenance",now=0,score=5)
