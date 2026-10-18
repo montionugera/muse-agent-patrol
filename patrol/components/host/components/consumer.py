@@ -538,19 +538,24 @@ class MuseConsumer:
                 "remote_action_issued":False}
 
     def recover_exact_confirmed(self, wakeup_id, generation, worker, now):
-        """Resume and complete *only* an original verified-confirmed reply.
+        """Atomically resume AND locally finish exact original confirmed effects.
 
-        Recovery is restricted to the original Worker receipt and the exact
-        Scheduler-linked Outbox rows. It can neither invent Host acceptance
-        nor mark unrelated/unattributed platform messages as this work.
-        A current Host intent and newly granted Scheduler + Queue generations
-        are still required; no leases are resurrected or remotely resent.
+        The original Worker receipt and every Scheduler-linked remote ID
+        must preexist independently. Scheduler grant, Queue claim, resumed
+        Worker progress and local three-part finish share ONE transaction.
+        No platform request or fresh Outbox logical key is ever generated.
         """
         if (not isinstance(worker,str) or not 1<=len(worker)<=128
                 or type(generation) is not int or generation<1):
             raise ValueError("bounded original Worker and wake generation required")
+        # Register/sync is an idempotent preflight, not a running lease.
+        original=self.db.read("SELECT source_type,source_id FROM wakeup_requests WHERE id=?",
+                              (wakeup_id,))
+        if original and original[0]["source_type"]=="work":
+            self.scheduler.sync_work(now,limit=500,
+                                     focus_work_id=original[0]["source_id"])
         with self.db.transaction() as c:
-            original=c.execute("""SELECT * FROM wakeup_requests WHERE id=?""",
+            original=c.execute("SELECT * FROM wakeup_requests WHERE id=?",
                                (wakeup_id,)).fetchone()
             if original and original["source_type"]=="work":
                 finished=c.execute("""SELECT x.status,x.worker,x.wakeup_generation,
@@ -558,9 +563,6 @@ class MuseConsumer:
                     JOIN work_items w ON w.id=?
                     WHERE x.wakeup_id=?""",
                     (original["source_id"],wakeup_id)).fetchone()
-                # Idempotent *read-only* acknowledgement after the first
-                # atomic finish retired a best-effort notification. A caller
-                # cannot complete or alter anything through this shortcut.
                 if (finished and finished["status"]=="finished"
                         and finished["worker"]==worker
                         and finished["wakeup_generation"]==generation
@@ -570,7 +572,7 @@ class MuseConsumer:
                             "remote_action_issued":False}
             wake=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
             if wake["source_type"]!="work":
-                raise ValueError("only a uniquely linked human_action can be recovered")
+                raise ValueError("only uniquely linked human_action may be recovered")
             work=c.execute("SELECT status FROM work_items WHERE id=?",
                            (wake["source_id"],)).fetchone()
             if not work:
@@ -581,8 +583,8 @@ class MuseConsumer:
             if work["status"] not in ("pending","retry_wait"):
                 return {"status":"work_not_ready","work_id":wake["source_id"],
                         "remote_action_issued":False}
-            activity=c.execute("""SELECT id FROM schedule_activities WHERE
-                work_id=?""",(wake["source_id"],)).fetchone()
+            activity=c.execute("SELECT id FROM schedule_activities WHERE work_id=?",
+                               (wake["source_id"],)).fetchone()
             receipt=c.execute("""SELECT worker,status,activity_id,wakeup_generation
                 FROM wakeup_execution_receipts WHERE wakeup_id=?""",
                 (wakeup_id,)).fetchone()
@@ -593,51 +595,67 @@ class MuseConsumer:
                     receipt["status"] not in ("started","progress")):
                 return {"status":"original_worker_evidence_missing",
                         "work_id":wake["source_id"],"remote_action_issued":False}
-            effects=c.execute("""SELECT o.id,o.status,o.remote_id
-                FROM scheduled_outbox so JOIN outbox o ON o.id=so.outbox_id
-                WHERE so.schedule_id=? ORDER BY so.staged_at,so.outbox_id""",
-                (activity["id"],)).fetchall()
-            # No "read_only" fabrication, no guessed reply text/cursor and
-            # no automatic resend. A confirmed, independently linked remote
-            # ID is the only allowed auto local-finish path here.
+            effects=self.outbox.agent_effects_tx(c,activity["id"])
             if not effects or any(
                     effect["status"]!="confirmed" or not effect["remote_id"]
                     for effect in effects):
                 return {"status":"exact_confirmed_effects_missing",
                         "work_id":wake["source_id"],"remote_action_issued":False}
-            exact_ids=[effect["id"] for effect in effects]
-        # The previous Worker started under an older generation. The
-        # resumed slice must attest progress, never forge a new Host start.
-        # Reacquire both leases through normal ranking/Queue public APIs.
-        decision=self.scheduler.dispatch(worker,now,for_work_id=wake["source_id"])
-        if not decision["granted"]:
-            return {"status":"scheduler_deferred",
-                    "scheduler_advice":decision.get("advice"),
-                    "hint_status":decision.get("hint_status"),
-                    "work_id":wake["source_id"],"remote_action_issued":False}
-        activity=decision["activity"]
-        if activity["id"]!=receipt["activity_id"]:
-            raise StaleLease("resumed activity no longer matches original Worker")
-        claimed=self.queue.claim_specific(wake["source_id"],worker,now,
-            {"kind":"accepted_host_wakeup" if wake["host_capability"]=="reliable_ack"
-                     else "best_effort_host_wakeup",
-             "wakeup_id":wakeup_id,"wakeup_generation":generation})
-        self.wakeups.record_execution(wakeup_id,generation,
-            activity["id"],activity["lease_version"],worker,
-            "progress",now,{"recovery":"exact_original_confirmed_effects",
-                            "original_outbox_ids":exact_ids,
-                            "remote_action_issued":False})
-        # Existing MuseConsumer.finish revalidates Host intent, BOTH fresh
-        # Scheduler/Queue generations, original Worker start, and *all*
-        # exact Outbox statuses inside one BEGIN IMMEDIATE transaction.
-        done=self.finish(wakeup_id,generation,worker,
-            activity["id"],activity["lease_version"],
-            claimed["lease_version"],now,
-            {"decision":"original_confirmed_remote_effect",
-             "original_outbox_ids":exact_ids,
-             "reason":"exact Scheduler-linked, independently confirmed remote IDs; no resend"})
-        return {**done,"recovered_original_confirmed":True,
-                "remote_action_issued":False}
+            exact_ids=[e["id"] for e in effects]
+            decision=self.scheduler.agent_dispatch_tx(
+                c,worker,now,for_work_id=wake["source_id"])
+            if not decision["granted"]:
+                return {"status":"scheduler_deferred",
+                        "scheduler_advice":decision.get("advice"),
+                        "hint_status":decision.get("hint_status"),
+                        "work_id":wake["source_id"],"remote_action_issued":False}
+            active=decision["activity"]
+            if active["id"]!=receipt["activity_id"]:
+                raise StaleLease("resumed activity differs from original Worker")
+            claimed=self.queue.agent_claim_specific_tx(
+                c,wake["source_id"],worker,now,
+                {"kind":"accepted_host_wakeup" if wake["host_capability"]=="reliable_ack"
+                        else "best_effort_host_wakeup",
+                 "wakeup_id":wakeup_id,"wakeup_generation":generation})
+            self.wakeups.agent_record_execution_tx(
+                c,wakeup_id,generation,active["id"],active["lease_version"],
+                worker,"progress",now,
+                {"recovery":"original_verified_confirmed_effects",
+                 "original_outbox_ids":exact_ids,"remote_action_issued":False})
+            # Verify the current host, both live leases, original Worker and
+            # all exact remote receipts before the atomic completion.
+            current=self.wakeups.agent_intent_tx(c,wakeup_id,generation)
+            self.scheduler.agent_owned_tx(
+                c,active["id"],worker,active["lease_version"],now,
+                kind="work",work_id=wake["source_id"])
+            self.queue.agent_owned_tx(
+                c,wake["source_id"],worker,claimed["lease_version"],now)
+            self.wakeups.agent_started_tx(
+                c,wakeup_id,generation,worker,active["id"],active["lease_version"])
+            confirmed=self.outbox.agent_effects_tx(c,active["id"])
+            if not confirmed or any(
+                    x["status"]!="confirmed" or not x["remote_id"]
+                    for x in confirmed) or {x["id"] for x in confirmed}!=set(exact_ids):
+                raise StaleLease("original exact effects changed before local finish")
+            evidence={"decision":"original_confirmed_remote_effect",
+                      "original_outbox_ids":exact_ids,
+                      "reason":"exact original Scheduler-linked independently confirmed remote IDs"}
+            self.queue.agent_finish_tx(
+                c,wake["source_id"],worker,claimed["lease_version"],now,evidence)
+            self.scheduler.agent_finish_tx(
+                c,self.scheduler.agent_owned_tx(
+                    c,active["id"],worker,active["lease_version"],now,
+                    kind="work",work_id=wake["source_id"]),
+                worker,active["lease_version"],now,evidence)
+            self.wakeups.agent_finish_tx(
+                c,wakeup_id,generation,worker,active["id"],active["lease_version"],
+                now,{"work_id":wake["source_id"],**evidence},
+                exact_ids,current["host_capability"])
+            return {"status":"finished","work_id":wake["source_id"],
+                    "confirmed_outbox_ids":exact_ids,
+                    "remote_effects_confirmed":len(exact_ids),
+                    "recovered_original_confirmed":True,
+                    "remote_action_issued":False}
 
     def recovery_report(self, work_id, now):
         """Inspect evidence for one stalled work item without writing or replaying.
