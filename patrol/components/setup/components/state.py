@@ -96,7 +96,7 @@ class Setup:
         ref,fingerprint=self._fingerprint(c,step)
         same=(prev and prev["reason"]==check["reason"] and
               prev["status"]==check["status"] and
-              prev["revision"]==self.manifest.revision and
+              prev["revision"]==self.manifest.step_revision(step) and
               prev["credential_fingerprint"]==fingerprint)
         asked=(prev["asked_at"] if same else None) if prev else None
         tries=prev["tries"]+1 if prev else 1
@@ -110,7 +110,7 @@ class Setup:
              credential_ref=excluded.credential_ref,
              credential_fingerprint=excluded.credential_fingerprint""",
              (step,check["status"],check["reason"],check["next_action"],
-              self.manifest.revision,asked,now,tries,ref,fingerprint))
+              self.manifest.step_revision(step),asked,now,tries,ref,fingerprint))
         return (not same or not asked)
 
     def init(self):
@@ -135,7 +135,7 @@ class Setup:
             report=[]
             for step in _ORDER:
                 row=rows.get(step)
-                current=(row is not None and row["revision"]==self.manifest.revision)
+                current=(row is not None and row["revision"]==self.manifest.step_revision(step))
                 status=row["status"] if current else "not_checked"
                 report.append({"step":step,"required":self._required(step),
                     "status":status,
@@ -164,13 +164,13 @@ class Setup:
         try:
             current=c.execute("SELECT * FROM setup_steps WHERE step=?",(step,)).fetchone()
             if (current and current["status"]=="denied" and
-                    current["revision"]==self.manifest.revision):
+                    current["revision"]==self.manifest.step_revision(step)):
                 return {"step":step,"required":self._required(step),
                         "status":"denied","reason":"OWNER_DECLINED_PREVIOUS_REQUEST",
                         "next_action":"await_trusted_owner_decision",
                         "prompt_new":False}
             if (current and current["status"]=="skipped_optional" and
-                    current["revision"]==self.manifest.revision):
+                    current["revision"]==self.manifest.step_revision(step)):
                 return {"step":step,"required":False,"status":"skipped_optional",
                         "reason":"OPTIONAL_DEFERRED","next_action":"none","prompt_new":False}
         finally:
@@ -225,7 +225,7 @@ class Setup:
                 with c:
                     current=c.execute("SELECT status,revision FROM setup_steps WHERE step=?",
                                       (step,)).fetchone()
-                    if current and current["revision"]==self.manifest.revision and (
+                    if current and current["revision"]==self.manifest.step_revision(step) and (
                             current["status"] in ("denied","skipped_optional")):
                         observations.append({"step":step,"status":current["status"],
                                              "prompt_new":False})
