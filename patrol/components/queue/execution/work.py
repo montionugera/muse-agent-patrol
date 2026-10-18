@@ -20,11 +20,32 @@ class Queue:
             return enqueue_tx(c, logical, kind, payload, now, **kwargs)
 
     def recover(self, now):
+        """Reclaim expired leases and boundedly repair historical Tick-blocked human work.
+
+        Only the exact legacy reason is eligible: Owner denials, Outbox
+        receipts, event cursors and all other blocked reasons are untouched.
+        """
         with self.db.transaction() as c:
-            # Local work may resume. Remote effects are independently held in Outbox.
             c.execute("""UPDATE work_items SET status='pending',lease_owner=NULL,lease_until=NULL,
                          next_action_at=?,block_reason='expired local lease; reconcile Outbox before any remote effect'
                          WHERE status='running' AND lease_until<=?""", (now, now))
+            legacy=c.execute("""SELECT id FROM work_items
+                WHERE type='human_action' AND status='blocked'
+                  AND block_reason='no authorized executor for human_action'
+                  AND lease_owner IS NULL
+                ORDER BY created_at,id LIMIT 100""").fetchall()
+            for row in legacy:
+                n=c.execute("""UPDATE work_items SET status='pending',
+                    block_reason=NULL,next_action_at=?
+                    WHERE id=? AND type='human_action' AND status='blocked'
+                    AND block_reason='no authorized executor for human_action'
+                    AND lease_owner IS NULL""",(now,row["id"])).rowcount
+                if n:
+                    c.execute("""INSERT INTO alerts(logical_key,kind,detail,created_at)
+                        VALUES(?,?,?,?) ON CONFLICT(logical_key) DO NOTHING""",
+                        ("reclassified_human_action:"+row["id"],"work_reclassified",
+                         canonical({"work_id":row["id"],"from":"legacy_tick_block",
+                                    "to":"pending","remote_action_issued":False}),now))
 
     def claim(self, owner, now, lane="any"):
         """Highest scored ready work, reserving optional slots for background.
@@ -43,6 +64,9 @@ class Queue:
                 SELECT 1 FROM events e WHERE e.id=work_items.event_id
                  AND e.source IN ('messages','agent_events'))
             """ if lane=="local_messages" else "")
+        # Tick has exactly one deterministic handler: inspect_event.
+        # Model-decision work is owned by Scheduler -> HATCH -> Muse.
+        background_filter=" AND type='inspect_event' "+background_filter
         with self.db.transaction() as c:
             row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait')
                 AND next_action_at<=? """+background_filter+"""
@@ -71,6 +95,14 @@ class Queue:
         if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
             raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
+            if authorization_evidence.get("kind")=="accepted_host_wakeup":
+                wake=c.execute("""SELECT id FROM wakeup_requests
+                    WHERE id=? AND source_type='work' AND source_id=?
+                    AND status='accepted' AND lease_version=?""",
+                    (authorization_evidence.get("wakeup_id"),ident,
+                     authorization_evidence.get("wakeup_generation"))).fetchone()
+                if wake is None:
+                    raise StaleLease("Muse handoff requires an accepted matching host wakeup")
             # Scheduler-controlled work must be claimed by the same worker
             # in the current live time slice; legacy unscheduled work is
             # unchanged. Prevent claiming the underlying Queue in suspension.
