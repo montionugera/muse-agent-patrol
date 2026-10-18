@@ -198,8 +198,11 @@ class SocialWakeTests(unittest.TestCase):
         content=hook.read_text(encoding="utf-8")
         self.assertNotIn("CREWQUAY_SOCIAL_IDLE_ENABLED",content)
         self.assertIn("social-sync --if-idle-due",content)
-        self.assertIn("CREWQUAY_HOST_WAKEUP_WIRED",content)
-        self.assertLess(content.index("CREWQUAY_HOST_WAKEUP_WIRED"),
+        # Host's native wake() is only best-effort unless a real adapter
+        # provides an independent, validated acceptance receipt.
+        self.assertNotIn("CREWQUAY_HOST_WAKEUP_WIRED",content)
+        self.assertIn("CREWQUAY_HOST_CAPABILITY",content)
+        self.assertLess(content.index("CREWQUAY_HOST_CAPABILITY"),
                         content.index("host-wakeup-prepare"))
         self.assertNotIn("--include-social",content)
         self.assertLess(content.index("tick --light"),content.index("social-sync --if-idle-due"))
@@ -210,7 +213,7 @@ class SocialWakeTests(unittest.TestCase):
             syntax=subprocess.run(["bash","-n",str(hook)],capture_output=True,text=True)
             self.assertEqual(syntax.returncode,0,syntax.stderr)
 
-    def test_unwired_reference_hook_does_not_claim_unknown_host_wakeup(self):
+    def test_default_hook_uses_best_effort_without_claiming_host_receipt(self):
         if (os.name!="posix" or not shutil.which("bash") or
                 not shutil.which("flock") or not shutil.which("timeout")):
             self.skipTest("reference Hook requires bash, flock and timeout")
@@ -240,23 +243,25 @@ class SocialWakeTests(unittest.TestCase):
                 CREWQUAY_HOOK_LOCK=str(folder/"hook.lock"),
                 MOCK_CALLS=str(calls),
                 PATH=str(bin_dir)+os.pathsep+os.environ.get("PATH",""))
-            # The default must be safe even with no deployment flag at all.
-            env.pop("CREWQUAY_HOST_WAKEUP_WIRED",None)
+            # Best-effort needs no invented Host receipt or operator flag.
+            env.pop("CREWQUAY_HOST_CAPABILITY",None)
             result=subprocess.run(["bash",str(hook)],env=env,
                                   capture_output=True,text=True,timeout=12)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertIn('"status":"poll_only"',result.stdout)
+            self.assertIn('"status":"idle"',result.stdout)
             commands=calls.read_text(encoding="utf-8").splitlines()
             # Phase 7 bootstraps a deployment run inside the same original
             # Hook, without leasing or faking a Host wake-up.
-            self.assertEqual(len(commands),5,commands)
+            self.assertGreaterEqual(len(commands),6,commands)
             self.assertIn("tick --light",commands[0])
             self.assertRegex(commands[1],r"deployment-ensure --repo-sha [0-9a-f]{40}")
             self.assertIn("platform-auth-bootstrap --deployment-run-id",commands[2])
             self.assertIn("--if-due",commands[2])
             self.assertIn("outbox-drain --once --lane any",commands[3])
             self.assertIn("social-sync --if-idle-due",commands[4])
-            self.assertFalse(any("host-wakeup-prepare" in x for x in commands))
+            self.assertTrue(any(
+                "host-wakeup-prepare" in x and "--host-capability best_effort" in x
+                for x in commands))
             self.assertNotIn("SHOULD_NOT_WAKE",result.stdout)
 
     def test_old_work_promise_database_migrates_without_losing_lease_history(self):
