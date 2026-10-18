@@ -121,7 +121,7 @@ class HostHandoffTests(unittest.TestCase):
         self.assertIn("host-wakeup-prepare",script)
         self.assertIn("outbox-drain --once --lane any",script)
         self.assertLess(script.index("host-wakeup-prepare"),
-                        script.index('wake "durable CrewQuay'))
+                        script.index('wake "CrewQuay Muse work ready'))
         self.assertIn("requires_host_receipt",Path(__file__).resolve().parents[1].joinpath(
             "patrol/components/host/components/bridge.py").read_text(encoding="utf-8"))
         self.assertNotIn('wakeup-ack --result accepted',script)

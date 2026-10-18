@@ -48,7 +48,7 @@ class SafetyChecks(unittest.TestCase):
         self.assertEqual((state['received'],state['target']),('9','10'))
 
     def test_expired_and_reclaimed_worker_cannot_finish(self):
-        q=Queue(self.db,10); ident=q.enqueue('x','human_action',{},100)
+        q=Queue(self.db,10); ident=q.enqueue('x','inspect_event',{},100)
         old=q.claim('old',100);q.recover(111);new=q.claim('new',111)
         with self.assertRaises(StaleLease):q.finish(old,112,evidence={'old':'x'})
         q.finish(new,112,evidence={'new':'x'})

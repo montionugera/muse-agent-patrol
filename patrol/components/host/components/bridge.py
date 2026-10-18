@@ -21,6 +21,13 @@ class HostHandoff:
         The Muse worker, not the Hook, owns schedule-next and model execution.
         """
         decision=self.scheduler.reconcile(now)["decision"]
+        # A host wake is not a Scheduler preemption. The running Muse must
+        # reach a checkpoint/yield safe point before another activity can be
+        # delivered; otherwise an accepted wake would be stranded.
+        if decision["running"] is not None:
+            return {"should_wake":False,"host_called":False,
+                    "status":"scheduler_busy","activity_dispatched":False,
+                    "scheduler_advice":decision["advice"]}
         # Idle social is opt-in only. The same Hook and wakeup table handle
         # it, but never wake for social while another activity is running
         # or an eligible higher-value formal task is the best candidate.
@@ -30,9 +37,14 @@ class HostHandoff:
         social_id=decision["candidate"]["id"] if social_eligible else None
         if social_id:
             self.wakeups.stage_social(now,social_id)
+        # Do not wake a lower-ranked work item while Scheduler would deny
+        # its for-work-id dispatch. Preemption is checkpointed, not stolen.
+        focus_work=(decision["candidate"]["work_id"]
+                    if decision["candidate"] and
+                       decision["candidate"]["kind"]=="work" else None)
         leased=self.wakeups.claim_next(
             owner,now,allow_social=social_eligible,
-            social_activity_id=social_id)
+            social_activity_id=social_id,focus_work_id=focus_work)
         if leased is None:
             return {"should_wake":False,"host_called":False,
                     "status":"idle","activity_dispatched":False,

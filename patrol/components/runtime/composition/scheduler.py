@@ -52,8 +52,10 @@ class Tick(ActionSender):
             if not item:
                 break
             if item["type"]!="inspect_event":
-                self.queue.finish(item,now,status="blocked",reason="no authorized executor for "+item["type"])
-                self.db.alert("missing_executor:"+item["id"],"blocked",{"work_id":item["id"],"type":item["type"]},now)
+                # Defensive fallback if a future Queue implementation admits a
+                # model action: release it, never convert it to blocked.
+                self.queue.finish(item,now,status="retry_wait",
+                                  reason="wrong consumer: requires Muse",retry_at=now+60)
                 continue
             try:
                 rows=self.db.read("SELECT * FROM events WHERE id=?",(item["payload"]["event_id"],))
@@ -187,6 +189,7 @@ class Tick(ActionSender):
                       (self.run_id,start))
         try:
             self.queue.recover(start)
+            report["unsupported_work_blocked"]=self.queue.quarantine_unknown(start)
             wakeup_recovery=self.wakeups.recover(start,detail=True)
             report["wakeup_unknown_recovered"]=wakeup_recovery["unknown"]
             report["wakeup_obsolete_recovered"]=wakeup_recovery["obsolete"]

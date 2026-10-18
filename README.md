@@ -50,6 +50,27 @@ Agent 按 [Agent 接入指南](docs/AGENT_GUIDE.md) 执行一次完整流程：�
 
 明确区分 `supported`、`granted`、`eligible_now`。正式项目角色、计划和任务所属关系由 CrewQuay 服务端权威复核；聊天中的“Owner 说过”不是正式授权。旧服务端只有明确 404 不支持 Runtime Manifest 时才保留旧白名单作为拒绝优先的兼容路径，网络错误或权限拒绝绝不偷偷使用缓存放行；本地 `allow_writes=false` 紧急停机和 Owner 禁止项永远优先。旧 SQLite 所有游标、排队活动、leases 和 outbox 都原样保留。无新 cron/watchdog。
 
+
+## human_action 自主消费闭环（Issue #39）
+
+HATCH 唯一 60 秒 Hook 运行 Light Tick / Outbox 补偿；**Tick 只领取 inspect_event**，不会执行模型，也不会误将 human_action 写成 blocked。历史精确匹配的旧版误阻塞项每轮最多修复 100 条，保留同一 SQLite、游标、Outbox 和其他真正拒绝原因。
+
+**部署三次握手验证 ≠ Muse 自主执行 Ready**。先运行 `python3 -m patrol --config <配置> autonomy-status`。没有真实 Host wake 桥时返回 `BLOCKED_HOST_WAKE`；即使设置 `CREWQUAY_HOST_WAKEUP_WIRED=1` 仍需见到真实唤醒接受回执、Muse started/progress/finished 和远端 confirmed。仓库不负责安装原生 HATCH 入口、提供模型或伪造 Host ACK。
+
+真实 Host 调用 `wake(..., prepared_json)` **并从 HATCH 接收独立可验的 accepted 凭证**后，使用现有 `wakeup-ack` 落库；被唤醒的真实 Muse Agent（不是 Owner 操作员）运行：
+
+```bash
+python3 -m patrol --config "$CREWQUAY_CONFIG" --db "$CREWQUAY_DB" muse-consume \
+  --wakeup-id "$WAKEUP_ID" --wakeup-generation "$WAKEUP_GENERATION" \
+  --worker "$MUSE_WORKER_ID"
+```
+
+仅在 accepted 且 Actor 已绑定、该工作为 Scheduler 当前最高可执行项时，才获取真实 Queue 与 Scheduler 双租约，并留下 `wakeup-execution started`。Muse 必须自行分析工作，先核实平台正式状态、Actor grants/角色及 Owner 禁止策略。普通聊天中“Owner 让我做”不构成授权。远端动作必须使用返回的 `scheduler_activity_id`、`scheduler_generation`、`worker` 做 `stage` fencing，再通过 Outbox ActionSender 和 exact receipt 获取 `confirmed`。网络 `unknown` 必须原键 GET 对账，绝不可更换 requestId。
+
+当每一条计划内 Outbox 均 `confirmed`（或者真实无写工作有可核查的 `{"decision":"read_only","reason":"..."}` 或 `skipped` 证据）后，Muse 运行 `muse-finish --wakeup-id ... --wakeup-generation ... --worker ... --activity-id ... --activity-generation ... --work-lease-version ... --evidence <JSON文件>`，在一个 SQLite 事务内完成 work、Scheduler 和 wakeup-execution finished；过期租约或 prepared/unknown Outbox 会被拒绝。抢占时沿用 `schedule-checkpoint --yield`，恢复后必须获得新的 generation、记录 progress，再执行。
+
+真实生产三项连续工作 E2E 仍须宿主现场验证，仓库单元测试只能模拟 Host 接收与 Outbox confirmed，**不得把测试伪造数据当成远端回执**。详见 [Agent 使用指南](docs/AGENT_GUIDE.md)。
+
 ## 主要能力
 
 | 能力 | 说明 |
