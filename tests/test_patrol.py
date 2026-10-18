@@ -115,20 +115,20 @@ class QueueTests(Fixture):
 
     def test_completion_needs_evidence(self):
         q=Queue(self.db)
-        q.enqueue("a","human_action",{},0)
+        q.enqueue("a","inspect_event",{},0)
         a=q.claim("A",0)
         with self.assertRaises(ValueError):
             q.finish(a,1)
 
     def test_priority_aging(self):
         q=Queue(self.db)
-        old=q.enqueue("old","x",{},0)
-        q.enqueue("new","x",{},10000,priority=1)
+        old=q.enqueue("old","inspect_event",{},0)
+        q.enqueue("new","inspect_event",{},10000,priority=1)
         self.assertEqual(q.claim("A",10000)["id"],old)
 
     def test_atomic_claim_across_processes(self):
         q=Queue(self.db)
-        q.enqueue("single","x",{},0)
+        q.enqueue("single","inspect_event",{},0)
         script="""import json,sys
 from patrol.components.persistence.index import Database
 from patrol.components.queue.index import Queue
@@ -400,12 +400,12 @@ class MigrationTests(Fixture):
 
 
 class RuntimeTests(Fixture):
-    def test_offline_never_reads_credentials_and_blocks_missing_executor(self):
+    def test_offline_never_reads_credentials_or_claims_human_decisions(self):
         q=Queue(self.db)
         q.enqueue("human","human_action",{"text":"send a secret"},100)
         report=Tick(self.db,self.config,clock=lambda:100).run()
         self.assertEqual(report["status"],"ok")
-        self.assertEqual(self.db.read("SELECT status FROM work_items")[0]["status"],"blocked")
+        self.assertEqual(self.db.read("SELECT status FROM work_items")[0]["status"],"pending")
         self.assertEqual(self.db.read("SELECT * FROM outbox"),[])
 
     def test_transport_write_gate_and_no_redirect(self):
