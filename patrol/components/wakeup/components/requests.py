@@ -504,6 +504,7 @@ class Wakeups:
                 or type(limit) is not int or not 1<=limit<=500):
             raise ValueError("invalid bounded execution health scan")
         counts={"accepted_without_start":0,"started_without_progress":0,
+                "best_effort_started_stalled":0,
                 "new_alerts":0,"host_invoked":False}
         with self.db.transaction() as c:
             rows=c.execute("""SELECT w.*,x.status AS execution_status,
@@ -537,6 +538,49 @@ class Wakeups:
                     logical_key,kind,detail,created_at) VALUES(?,?,?,?)
                     ON CONFLICT(logical_key) DO NOTHING""",
                     (key,kind,canonical(detail),now)).rowcount
+            # Best-effort wake has no Host accepted receipt. A silent Worker
+            # is reported, never replayed automatically. Heartbeat evidence
+            # postpones this alert but does not claim business progress.
+            stalled=c.execute("""SELECT w.*,n.generation AS notice_generation,
+                x.worker AS observed_worker,
+                COALESCE(h.last_observed_at,x.updated_at,n.worker_started_at)
+                    AS last_observed
+                FROM host_wakeup_notifications n
+                JOIN wakeup_requests w ON w.id=n.wakeup_id
+                JOIN wakeup_execution_receipts x ON x.wakeup_id=w.id
+                    AND x.wakeup_generation=n.generation
+                LEFT JOIN worker_lease_heartbeats h ON h.wakeup_id=w.id
+                    AND h.wakeup_generation=n.generation
+                WHERE n.worker_started_at IS NOT NULL
+                  AND w.status IN ('pending','retry_wait','unknown')
+                  AND x.status IN ('started','progress')
+                  AND COALESCE(h.last_observed_at,x.updated_at,n.worker_started_at)<=?
+                  AND NOT EXISTS(SELECT 1 FROM alerts a
+                    WHERE a.logical_key=('wakeup_execution_best_effort:'||w.id||':'||
+                                           CAST(n.generation AS TEXT)))
+                ORDER BY last_observed,w.id LIMIT ?""",(now-threshold,limit)).fetchall()
+            for row in stalled:
+                # _source_alive selects *unclaimed* Wakeup sources, whereas
+                # a successfully started Worker owns a Queue status=running.
+                # Check a nonterminal business source instead of silently
+                # excluding every live-but-stalled best-effort Worker.
+                source=c.execute("""SELECT status FROM work_items
+                    WHERE id=? AND type='human_action'""",
+                    (row["source_id"],)).fetchone()
+                if not source or source["status"] not in ("pending","retry_wait","running"):
+                    continue
+                key="wakeup_execution_best_effort:"+row["id"]+":"+str(row["notice_generation"])
+                detail={"wakeup_id":row["id"],"source_id":row["source_id"],
+                        "worker":row["observed_worker"],
+                        "wakeup_generation":row["notice_generation"],
+                        "last_observed_at":row["last_observed"],
+                        "requires_worker_reconciliation":True,
+                        "host_accepted_inferred":False,"auto_retried":False}
+                n=c.execute("""INSERT INTO alerts(logical_key,kind,detail,created_at)
+                    VALUES(?,?,?,?) ON CONFLICT(logical_key) DO NOTHING""",
+                    (key,"best_effort_started_stalled",canonical(detail),now)).rowcount
+                counts["new_alerts"]+=n
+                counts["best_effort_started_stalled"]+=n
         return counts
 
 

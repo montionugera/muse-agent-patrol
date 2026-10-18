@@ -305,7 +305,7 @@ class Outbox:
                 except Exception:
                     result=None
                 if result:
-                    self._confirmed(row["id"],result)
+                    self._confirmed(row["id"],result,verified_at=now)
                 else:
                     with self.db.transaction() as c:
                         c.execute("UPDATE outbox SET next_attempt_at=? WHERE id=? AND status='unknown'",
@@ -354,7 +354,7 @@ class Outbox:
                     except Exception:
                         result=None
                     if result:
-                        self._confirmed(row["id"],result,token)
+                        self._confirmed(row["id"],result,token,verified_at=now)
                     else:
                         self._result(row["id"],token,"unknown",now+300,
                                      "success response unconfirmed")
@@ -381,10 +381,11 @@ class Outbox:
                 break
         return report
 
-    def _confirmed(self, ident, evidence, token=None):
+    def _confirmed(self, ident, evidence, token=None, verified_at=None):
         with self.db.transaction() as c:
-            sql="UPDATE outbox SET status='confirmed',result=?,remote_id=?,dispatch_owner=NULL,error=NULL WHERE id=?"
-            args=[canonical(evidence),str(evidence.get("id","")),ident]
+            sql="""UPDATE outbox SET status='confirmed',result=?,remote_id=?,
+                verified_at=?,dispatch_owner=NULL,error=NULL WHERE id=?"""
+            args=[canonical(evidence),str(evidence.get("id","")),verified_at,ident]
             if token:
                 sql+=" AND dispatch_owner=? AND status='sending'"
                 args.append(token)
@@ -403,7 +404,10 @@ class Outbox:
         if not isinstance(evidence,dict) or not evidence or confirmed==proven_absent:
             raise ValueError("choose one evidence-backed resolution")
         with self.db.transaction() as c:
-            n=c.execute("""UPDATE outbox SET status=?,result=?,next_attempt_at=?,error=NULL
-                WHERE id=? AND status='unknown'""",("confirmed" if confirmed else "prepared",canonical(evidence),now,ident)).rowcount
+            n=c.execute("""UPDATE outbox SET status=?,result=?,next_attempt_at=?,
+                verified_at=?,error=NULL
+                WHERE id=? AND status='unknown'""",
+                ("confirmed" if confirmed else "prepared",canonical(evidence),now,
+                 now if confirmed else None,ident)).rowcount
             if n!=1:
                 raise ValueError("unknown Outbox item required")

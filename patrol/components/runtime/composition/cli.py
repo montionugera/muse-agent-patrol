@@ -29,6 +29,7 @@ from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
 from .scheduler import Tick
 from .cycle import RuntimeCycle
+from .latency import LatencyReport
 
 
 def timestamp(value):
@@ -76,6 +77,8 @@ def parser():
     sub.add_parser("init")
     sub.add_parser("doctor")
     sub.add_parser("status")
+    latency=sub.add_parser("latency-report")
+    latency.add_argument("--limit",type=int,default=100)
     sub.add_parser("platform-catalog")
     sub.add_parser("platform-auth-sync")
     a=sub.add_parser("platform-auth-bootstrap")
@@ -373,6 +376,8 @@ def main(argv=None):
                     "cursors":db.read("SELECT * FROM sync_cursors"),"attention":db.read("SELECT * FROM attention_sessions"),
                     "alert_count":db.read("SELECT count(*) AS count FROM alerts")[0]["count"],
                     "runs":db.read("SELECT id,started_at,ended_at,status FROM patrol_runs ORDER BY started_at DESC LIMIT 5")}
+            elif args.command=="latency-report":
+                result=LatencyReport(db).snapshot(now,limit=args.limit)
             elif args.command=="tick":
                 if args.light and args.ws:
                     raise ValueError("light tick must not open a persistent websocket")
