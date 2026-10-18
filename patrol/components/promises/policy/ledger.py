@@ -76,6 +76,55 @@ class Promises:
                 progress_evidence=?,next_action_at=? WHERE id=?""",(now,now,canonical(evidence),next_action_at,ident))
             self._history(c,ident,"progress",now,evidence)
 
+    def agent_progress_tx(self,c,ident,now,evidence,next_action_at):
+        """Advance the exact promise in the Agent's fenced SQLite transaction."""
+        self._time(now)
+        self._time(next_action_at)
+        if (not isinstance(evidence,dict) or not evidence
+                or next_action_at<=now
+                or next_action_at-now>self.MAX_NEXT_ACTION_DELAY):
+            raise ValueError("promise progress requires evidence and next action within 15 minutes")
+        row=c.execute("SELECT * FROM promises WHERE id=? AND status!='done'",
+                      (ident,)).fetchone()
+        if not row:
+            raise ValueError("unknown or completed promise")
+        c.execute("""UPDATE promises SET first_action_at=COALESCE(first_action_at,?),
+            last_progress_at=?,progress_evidence=?,next_action_at=?
+            WHERE id=? AND status!='done'""",
+            (now,now,canonical(evidence),next_action_at,ident))
+        self._history(c,ident,"progress",now,evidence)
+        return dict(row)
+
+    def agent_complete_tx(self,c,ident,now,evidence,*,linked_work_finished=False):
+        """Close the promise only after exact Worker/Outbox checks by Consumer."""
+        row=c.execute("SELECT * FROM promises WHERE id=? AND status!='done'",
+                      (ident,)).fetchone()
+        if not row or not isinstance(evidence,dict) or not evidence:
+            raise ValueError("current promise completion proof required")
+        work=c.execute("SELECT status,type FROM work_items WHERE id=?",
+                       (row["work_item_id"],)).fetchone()
+        if not work:
+            raise ValueError("promise source work missing")
+        if linked_work_finished:
+            if work["type"]!="human_action" or work["status"]!="done":
+                raise ValueError("human_action promise requires finished Queue lease")
+        else:
+            if work["type"]=="human_action" or work["status"]=="running":
+                raise ValueError("cannot complete leased or unconfirmed human work")
+            n=c.execute("""UPDATE work_items SET status='done',evidence=?,
+                first_action_at=COALESCE(first_action_at,?),last_progress_at=?,
+                lease_owner=NULL,lease_until=NULL WHERE id=?
+                AND status IN ('pending','retry_wait','blocked','needs_approval')""",
+                (canonical(evidence),now,now,row["work_item_id"])).rowcount
+            if n!=1:
+                raise ValueError("promise source work is not finishable")
+        c.execute("""UPDATE promises SET status='done',completed_evidence=?,
+            first_action_at=COALESCE(first_action_at,?),last_progress_at=?
+            WHERE id=? AND status!='done'""",
+            (canonical(evidence),now,now,ident))
+        self._history(c,ident,"completed",now,evidence)
+        return dict(row)
+
     def request_extension(self, ident, due_at, reason, evidence, now):
         self._time(now)
         self._time(due_at)
