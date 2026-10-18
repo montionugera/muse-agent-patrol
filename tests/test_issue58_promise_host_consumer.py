@@ -161,6 +161,18 @@ class PromiseHostConsumerTests(unittest.TestCase):
         self.assertEqual(self.db.read(
             "SELECT status FROM promises WHERE id=?",(p,))[0]["status"],"done")
 
+    def test_missing_promise_signal_is_not_mislabeled_as_cooldown(self):
+        p=self.promises.create("muse","owner","msg-missing","Act",1000,
+                               1000,1000,due_at=1500,kind="human_action")
+        self.scheduler.sync_work(1000)
+        for mode in ("best_effort","reliable_ack"):
+            report=self.host.prepare("hatch",1000,capability=mode)
+            self.assertEqual(report["status"],"promise_signal_missing")
+            self.assertFalse(report["should_wake"])
+        self.assertEqual(self.db.read(
+            "SELECT count(*) AS n FROM wakeup_requests WHERE source_id=?",
+            (p,))[0]["n"],0)
+
     def test_no_false_cooldown_when_next_step_not_due(self):
         self.create("research","future")
         with self.db.transaction() as c:
