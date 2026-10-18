@@ -26,6 +26,7 @@ from ...transport.index import Client, credential_provider
 from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
 from .scheduler import Tick
+from .cycle import RuntimeCycle
 
 
 def timestamp(value):
@@ -180,6 +181,9 @@ def parser():
     a.add_argument("--activity-generation",type=int,required=True)
     a.add_argument("--work-lease-version",type=int,required=True)
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("runtime-cycle")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--host-capability",choices=("best_effort","reliable_ack","unavailable"),default="best_effort")
     a=sub.add_parser("host-wakeup-prepare")
     a.add_argument("--host-capability",choices=("best_effort","reliable_ack","unavailable"),
                    default="reliable_ack",
@@ -274,6 +278,12 @@ def main(argv=None):
     args=parser().parse_args(argv)
     try:
         cfg=load_config(args.config,database=args.db)
+        if args.command=="runtime-cycle":
+            # The coordinator is the parent of phase CLIs, so it must NOT hold
+            # the phase-level SQLite .tick.lock across child invocations.
+            result=RuntimeCycle(args.config,cfg.database).run(args.owner,args.host_capability)
+            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+            return 0 if result["status"]=="ok" else 1
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
             if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare") and not Path(cfg.database).is_file():
