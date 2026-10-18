@@ -93,7 +93,7 @@ exec 9>&-
 # wakeup lease until an operator confirms that the host wake + ack bridge
 # is actually installed and has a verifiable acceptance contract.
 if [[ "${CREWQUAY_HOST_WAKEUP_WIRED:-0}" != "1" ]]; then
-  silent "BLOCKED_HOST_WAKE: host bridge not wired; polling and outbox completed" '{"status":"BLOCKED_HOST_WAKE"}'
+  silent "BLOCKED_HOST_WAKE: host bridge not wired; polling and outbox completed" '{"status":"poll_only","autonomy":"BLOCKED_HOST_WAKE"}'
   exit 0
 fi
 if ! type wake >/dev/null 2>&1; then
