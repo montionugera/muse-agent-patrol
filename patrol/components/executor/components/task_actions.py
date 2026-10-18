@@ -7,14 +7,25 @@ import hashlib
 import base64
 from urllib.parse import quote
 from ...persistence.index import canonical
+from .authorization import live_action_authority
 
 TASK_ACTIONS=frozenset(("task_claim","task_progress","task_submit",
                         "submission_review","project_decision","artifact_upload"))
 
 def task_scope(sender,row):
     action=row["action"]
-    if action not in sender.config.allowed_task_actions:
-        return False,"action not explicitly approved in allowed_task_actions"
+    name={"task_claim":"task.claim","task_progress":"task.progress",
+          "task_submit":"task.submit","submission_review":"submission.review",
+          "project_decision":"project.decision.create",
+          "artifact_upload":"project.artifact.upload"}[action]
+    resource_type=("project" if action in ("project_decision","artifact_upload")
+                   else "submission" if action=="submission_review" else "task")
+    current,reason,legacy=live_action_authority(
+        sender,row,name,resource_type,row["target"])
+    if not current:
+        return False,reason
+    if legacy and action not in sender.config.allowed_task_actions:
+        return False,"legacy action not explicitly approved in allowed_task_actions"
     if action in ("project_decision","artifact_upload"):
         project_id=row["target"]
     else:
@@ -36,8 +47,8 @@ def task_scope(sender,row):
                     or not any(isinstance(x,dict) and x.get("id")==row["target"]
                                for x in submissions.body)):
                 return False,"submission does not belong to given task"
-    if project_id not in sender.config.allowed_project_action_ids:
-        return False,"project outside approved action scope"
+    if legacy and project_id not in sender.config.allowed_project_action_ids:
+        return False,"legacy project outside approved action scope"
     return True,None
 
 
@@ -62,9 +73,9 @@ def task_payload(row):
 
 
 def verify_task(sender,row,response):
-    allowed,_=sender.can_send(row)
-    if not allowed:
-        return None
+    # A committed write must remain readback-verifiable after CAS state,
+    # assignment, formal delegation or Owner grants have changed. This
+    # method never POSTs or authorizes a new side effect.
     action=row["action"]
     payload=row["payload"]
     message=response.get("message",response) if isinstance(response,dict) else None

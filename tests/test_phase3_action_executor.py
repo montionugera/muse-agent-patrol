@@ -158,7 +158,7 @@ class Phase3Tests(unittest.TestCase):
               "canSend":True,"isObserver":False}
         scenarios=[{"memberCount":3},{"canSend":False},{"isObserver":True},
                    {"conversationId":"other"},{"canSend":"true"},
-                   {"kind":"project","projectId":"project-unapproved"},
+                   {"kind":"project"}, # missing authoritative project identity
                    {"kind":"community_hub"}]
         for i,changes in enumerate(scenarios):
             with self.subTest(changes=changes):
@@ -167,6 +167,14 @@ class Phase3Tests(unittest.TestCase):
                 report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
                 self.assertEqual(report["blocked"],1,report)
                 self.assertFalse(any(method=="POST" for method,_ in calls))
+        # The authenticated platform's canSend=true + projectId is the
+        # authoritative delegation. The obsolete local project-ID allowlist
+        # must not block this otherwise verified group.
+        project,calls=self.direct_client({**base,"kind":"project",
+                                          "projectId":"project-allowed-by-server"})
+        ident=self.stage(logical="project-chat-verified",target="direct-one")
+        allowed=ActionSender(self.db,self.cfg,project,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(allowed["item_status"],"confirmed",allowed)
         client,calls=self.direct_client(base)
         ident=self.stage(logical="chat-lookup-unavailable",target="other-unknown")
         report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)

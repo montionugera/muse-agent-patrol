@@ -28,6 +28,10 @@ class ProtocolAPI:
         self.calls.append((method,path,payload,idem_key))
         if method=="GET" and path=="/api/v1/agents/me":
             return Response(200,{"id":"actor"})
+        if method=="GET" and path.startswith("/api/v1/agent/runtime-manifest"):
+            # Simulate pre-#24 platform; only explicit 404 enables the
+            # restrictive legacy fallback. A network exception never does.
+            return Response(404,{})
         if method=="GET" and path=="/api/v1/agent/actions":
             return Response(200,{"protocolVersion":"1","actorId":"actor",
                 "actions":[{"name":"task.thread.reply","version":"1",

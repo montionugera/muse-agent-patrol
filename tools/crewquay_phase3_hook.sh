@@ -2,8 +2,8 @@
 # Reference HATCH Hook, not installed/enabled by this repository.
 # Hook: Light Tick + independent action compensation + fenced Muse wake.
 # Requires prior host approval for credentialed polling and authorized writes.
-# Bounded Hook: light <=20 s, bootstrap <=6 s, drain <=18 s,
-# idle discovery <=5 s, wake reservation <=8 s. No second timer or cron.
+# Bounded Hook: light <=20 s, handshake <=6 s, auth <=5 s,
+# drain <=16 s, idle discovery <=5 s, wake reservation <=8 s. No second timer or cron.
 set -euo pipefail
 source "${HATCH_HOOK_RUNTIME:?host Hook runtime required}"
 
@@ -41,10 +41,25 @@ if flock -n 9; then
   fi
   log "phase7 deployment bootstrap exit=${BOOTSTRAP_EXIT}"
 
+  # Within the SAME 60s HATCH Hook, ask CrewQuay for the Actor's least-privilege
+  # first-deployment grant. The CLI enforces a SQLite-backed due timestamp and
+  # remote dedup; no new cron/watchdog and no per-task Owner prompting.
+  # This never approves its own request, and a failed grant does not block
+  # already-authorized tasks or Outbox reconciliation.
+  AUTH_EXIT=0
+  if [[ "$REPO_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    (cd "$REPO" && timeout 5s python3 -m patrol \
+      --config "$CONFIG" --db "$DB" platform-auth-bootstrap \
+      --deployment-run-id "hatch-${REPO_SHA:0:16}" --if-due >/dev/null 2>&1) || AUTH_EXIT=$?
+  else
+    AUTH_EXIT=2
+  fi
+  log "phase7 permission bootstrap exit=${AUTH_EXIT}"
+
   # Pure Python Executor, not a Muse worker. Only verified, authorized actions
   # can POST. An unknown remote result is readback-checked, never blindly resent.
   DRAIN_EXIT=0
-  (cd "$REPO" && timeout 18s python3 -m patrol \
+  (cd "$REPO" && timeout 16s python3 -m patrol \
     --config "$CONFIG" --db "$DB" outbox-drain --once --lane any \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"

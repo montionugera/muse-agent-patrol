@@ -209,6 +209,36 @@ class Tick(ActionSender):
                 event_result=self.collector.agent_events(self.clock())
                 report["event_replay"]=event_result
                 report["event_source"]="agent_events"
+                # A grants.changed event only invalidates local authority; it
+                # never grants write permission by itself. One bounded read
+                # fetches a fresh actor-bound snapshot, with safe retry.
+                pending=self.db.read(
+                    "SELECT value FROM meta WHERE key='authorization_sync_pending'")
+                next_at=self.db.read(
+                    "SELECT value FROM meta WHERE key='authorization_sync_next_at'")
+                if (pending and self.actor and
+                        (not next_at or float(next_at[0]["value"])<=self.clock()) and
+                        self.monotonic()<self.request_deadline-2):
+                    from ...executor.index import Authorization
+                    authority=Authorization(self.db)
+                    try:
+                        snapshot,status=authority.get(self.client,self.actor)
+                        if snapshot is not None and authority.sync_requests(self.client,self.actor):
+                            with self.db.transaction() as c:
+                                c.execute("DELETE FROM meta WHERE key IN "
+                                          "('authorization_sync_pending','authorization_sync_next_at')")
+                            report["authorization_revision"]=snapshot["revision"]
+                        else:
+                            with self.db.transaction() as c:
+                                c.execute("""INSERT INTO meta(key,value)
+                                    VALUES('authorization_sync_next_at',?)
+                                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                                    (str(self.clock()+60),))
+                            report["incomplete_sources"].append("authorization:refresh_deferred")
+                    except (BudgetExceeded,AuthError):
+                        report["incomplete_sources"].append("authorization:budget_or_auth")
+                    except Exception:
+                        report["incomplete_sources"].append("authorization:refresh_failed")
                 if event_result!="complete":
                     report["incomplete_sources"].append("agent_events:"+event_result)
                 report["errors"].extend(self.collector.errors)

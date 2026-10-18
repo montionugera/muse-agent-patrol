@@ -71,6 +71,13 @@ class Sync:
                                self.max_event_age_seconds,self.future_skew_seconds)
                     score=baseline_tx(c,row["id"],original,row["observed_at"])
                 elif source=="agent_events":
+                    # Authorization events are trusted only as invalidation
+                    # triggers. The subsequent manifest is re-authenticated.
+                    if item.get("type") in ("grants.changed","capabilities.changed",
+                                            "authorization.decided","authorization.revoked"):
+                        c.execute("""INSERT INTO meta(key,value)
+                            VALUES('authorization_sync_pending','1')
+                            ON CONFLICT(key) DO UPDATE SET value='1'""")
                     score=60
                     # A normalized message accompanies a server-visible event.
                     # Persist its first receipt, baseline, and inspector within

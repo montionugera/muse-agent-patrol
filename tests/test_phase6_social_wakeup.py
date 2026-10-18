@@ -249,11 +249,13 @@ class SocialWakeTests(unittest.TestCase):
             commands=calls.read_text(encoding="utf-8").splitlines()
             # Phase 7 bootstraps a deployment run inside the same original
             # Hook, without leasing or faking a Host wake-up.
-            self.assertEqual(len(commands),4,commands)
+            self.assertEqual(len(commands),5,commands)
             self.assertIn("tick --light",commands[0])
             self.assertRegex(commands[1],r"deployment-ensure --repo-sha [0-9a-f]{40}")
-            self.assertIn("outbox-drain --once --lane any",commands[2])
-            self.assertIn("social-sync --if-idle-due",commands[3])
+            self.assertIn("platform-auth-bootstrap --deployment-run-id",commands[2])
+            self.assertIn("--if-due",commands[2])
+            self.assertIn("outbox-drain --once --lane any",commands[3])
+            self.assertIn("social-sync --if-idle-due",commands[4])
             self.assertFalse(any("host-wakeup-prepare" in x for x in commands))
             self.assertNotIn("SHOULD_NOT_WAKE",result.stdout)
 

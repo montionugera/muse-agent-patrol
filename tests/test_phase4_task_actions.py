@@ -27,6 +27,8 @@ class TaskAPI:
         self.calls.append((method,path,payload,idem_key))
         if method=="GET" and path=="/api/v1/agents/me":
             return Response(200,{"id":"actor"})
+        if method=="GET" and path.startswith("/api/v1/agent/runtime-manifest"):
+            return Response(404,{})  # Verified older platform only.
         if method=="GET" and path=="/api/v1/tasks/task42":
             return Response(200,self.task.copy())
         if method=="GET" and path=="/api/v1/tasks/task42/submissions":

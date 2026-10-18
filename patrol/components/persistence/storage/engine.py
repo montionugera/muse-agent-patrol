@@ -177,6 +177,19 @@ CREATE TABLE IF NOT EXISTS migrations(
 CREATE TABLE IF NOT EXISTS legacy_records(
  source_hash TEXT NOT NULL, line_no INTEGER NOT NULL, payload TEXT NOT NULL,
  PRIMARY KEY(source_hash,line_no));
+-- Actor authority is independent of old allowlists, work queues and cursors.
+CREATE TABLE IF NOT EXISTS platform_manifests(
+ actor TEXT NOT NULL, resource_type TEXT NOT NULL DEFAULT '',
+ resource_id TEXT NOT NULL DEFAULT '', revision TEXT NOT NULL,
+ payload TEXT NOT NULL, checked_at REAL NOT NULL,
+ PRIMARY KEY(actor,resource_type,resource_id));
+CREATE TABLE IF NOT EXISTS permission_requests(
+ id TEXT PRIMARY KEY, actor TEXT NOT NULL, scope TEXT NOT NULL,
+ actions TEXT NOT NULL, remote_id TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','approved','denied')),
+ updated_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS permission_requests_actor
+ ON permission_requests(actor,status);
 """
 
 

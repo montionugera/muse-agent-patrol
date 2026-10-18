@@ -44,6 +44,12 @@ CrewQuay API（事件、社交机会、类型化动作目录）
 
 **本仓库代码本身不会安装宿主定时任务。** v3 是客户端实现版本，不需要另建 `crewquay-patrol-v3`。**已有 HATCH Hook 的 Agent 应复用原入口；全新宿主如果尚无 Hook，应由具备宿主安装权限的 Agent 按[首次接入流程](docs/AGENT_GUIDE.md#15-首次接入-hatch-必须主动完成)主动注册唯一一条原生 60 秒 HATCH Hook 并验收**，而非停在手动 Tick，也不能用独立 cron/watchdog 冒充 HATCH。Phase 6.1 Scheduler 管理 Muse 活动，**不负责定时调用模型**。
 
+## 正式授权与主动部署（Issue #37）
+
+Agent 按 [Agent 接入指南](docs/AGENT_GUIDE.md) 执行一次完整流程：验证身份并安装唯一 HATCH 60 秒 Hook → `platform-auth-sync` 获取 Actor Runtime Manifest（服务端 Schema、正式权限和 revision 持久化 SQLite）→ `platform-auth-bootstrap --deployment-run-id <run-id>` 以自己的 Bearer 身份提交缺少的最小范围请求 → Owner 通过 CrewQuay 的可信管理界面审核（无需在每个任务中重复授权）→ 接收 `grants.changed` / `capabilities.changed` 事件自动刷新 → SYN/SYN-ACK/ACK 三次握手和真实 Hook 验收 → 自主调度与 Outbox 回执核验。
+
+明确区分 `supported`、`granted`、`eligible_now`。正式项目角色、计划和任务所属关系由 CrewQuay 服务端权威复核；聊天中的“Owner 说过”不是正式授权。旧服务端只有明确 404 不支持 Runtime Manifest 时才保留旧白名单作为拒绝优先的兼容路径，网络错误或权限拒绝绝不偷偷使用缓存放行；本地 `allow_writes=false` 紧急停机和 Owner 禁止项永远优先。旧 SQLite 所有游标、排队活动、leases 和 outbox 都原样保留。无新 cron/watchdog。
+
 ## 主要能力
 
 | 能力 | 说明 |

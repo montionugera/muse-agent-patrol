@@ -15,6 +15,7 @@ from ...outbox.index import Outbox
 from ...transport.index import AuthError
 from .task_actions import TASK_ACTIONS, task_scope, task_path, task_payload, verify_task
 from .platform_actions import can_execute, verify_execution
+from .authorization import live_action_authority
 
 
 class ActionSender:
@@ -95,8 +96,11 @@ class ActionSender:
                 if found.body["chatId"]==target:
                     return False,"linked circle explicitly blocked by Owner"
         elif kind=="project":
-            if detail.get("projectId") not in self.config.allowed_project_action_ids:
-                return False,"project chat outside approved formal project scope"
+            # Authenticated CrewQuay chat metadata already says canSend and
+            # is checked at every write. Former local project whitelist
+            # duplicated the platform's current project membership authority.
+            if not detail.get("projectId"):
+                return False,"platform project chat has no project identity"
         return True,None
 
     def can_send(self,row):
@@ -134,24 +138,31 @@ class ActionSender:
             if not allowed:
                 return False,reason
         if row["action"] in ("project_message","task_thread_reply","room_message"):
-            # Project writes require an independent explicit allowlist. Read
-            # scopes (project_ids) MUST NOT implicitly grant write privileges.
-            if not self.config.allowed_project_action_ids:
-                return False,"no explicitly authorized project action scope"
-            if row["action"]=="project_message":
-                project_id=row["target"]
-            else:
-                resource=("tasks" if row["action"]=="task_thread_reply" else "rooms")
-                try:
-                    scope=self.client.request("GET","/api/v1/"+resource+"/"+
-                                              quote(row["target"],safe=""))
-                except Exception:
-                    return False,"resource authorization lookup unavailable"
-                if scope.status!=200 or not isinstance(scope.body,dict):
-                    return False,"resource is not currently readable"
-                project_id=scope.body.get("projectId")
-            if project_id not in self.config.allowed_project_action_ids:
-                return False,"project not in authorized action scope"
+            operation={"project_message":("project.message.send","project"),
+                       "task_thread_reply":("task.thread.reply","task"),
+                       "room_message":("room.message.send","room")}
+            name,kind=operation[row["action"]]
+            current,reason,legacy=live_action_authority(
+                self,row,name,kind,row["target"])
+            if not current:
+                return False,reason
+            if legacy:
+                if not self.config.allowed_project_action_ids:
+                    return False,"legacy project scope not explicitly authorized"
+                if kind=="project":
+                    project_id=row["target"]
+                else:
+                    endpoint=("tasks" if kind=="task" else "rooms")
+                    try:
+                        scope=self.client.request("GET","/api/v1/"+endpoint+"/"+
+                                                  quote(row["target"],safe=""))
+                    except Exception:
+                        return False,"legacy resource authorization lookup unavailable"
+                    if scope.status!=200 or not isinstance(scope.body,dict):
+                        return False,"legacy resource not currently accessible"
+                    project_id=scope.body.get("projectId")
+                if project_id not in self.config.allowed_project_action_ids:
+                    return False,"legacy resource outside Owner-approved project scope"
         if row["action"]=="platform_action":
             return can_execute(self,row)
         if row["action"] in TASK_ACTIONS:

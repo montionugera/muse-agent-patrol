@@ -2,14 +2,14 @@
 
 No client-known business endpoint table. The authenticated platform supplies
 the action catalog, authoritative project scope and exact durable receipts.
-Formal project actions retain local allow-lists. Community actions use the
-existing global remote-write permission plus an actor-bound server registry
-and authoritative resource checks. The server always makes the final decision.
+A fresh actor-bound Runtime Manifest replaces duplicated local action
+allowlists. Older servers explicitly fall back to old lists (never fail open).
 """
 import hashlib
 from urllib.parse import quote
 
 from ...persistence.index import canonical
+from .authorization import Authorization, PolicyEngine
 
 
 def can_execute(sender,row):
@@ -17,71 +17,76 @@ def can_execute(sender,row):
         return False,"not an Agent Action envelope"
     command=row["payload"]
     resource=command["resource"]
+    if not sender.config.allow_writes:
+        return False,"emergency write stop"
     is_community=resource["type"] in ("community","circle","post")
     if is_community:
-        if not sender.config.allow_writes:
-            return False,"outbound writes not enabled"
-        # The server remains authoritative. Owner denial is the only local
-        # per-social-action policy; no allowlist of permissible actions.
         if not sender.config.community_social_enabled:
             return False,"community social activity disabled by Owner"
         if command["action"] in sender.config.blocked_social_actions:
             return False,"community action explicitly blocked by Owner"
-        if (resource["type"]+":"+resource["id"]
-                in sender.config.blocked_social_resources):
+        if resource["type"]+":"+resource["id"] in sender.config.blocked_social_resources:
             return False,"community resource explicitly blocked by Owner"
         if not command["action"].startswith("community."):
             return False,"non-community action cannot target community resource"
-    elif command["action"] not in sender.config.allowed_platform_actions:
-        return False,"action not explicitly enabled"
+    if sender.client is None:
+        return False,"verified platform unavailable"
     try:
-        catalog=sender.client.request("GET","/api/v1/agent/actions")
+        manifest, status=Authorization(sender.db).get(sender.client,row["actor"],resource)
     except Exception:
-        return False,"action catalog unavailable"
-    if catalog.status!=200 or not isinstance(catalog.body,dict):
-        return False,"action catalog not accessible"
-    if (catalog.body.get("protocolVersion")!="1" or
-            catalog.body.get("actorId")!=row["actor"]):
-        return False,"catalog actor or protocol mismatch"
-    supported=any(
-        isinstance(item,dict) and
-        item.get("name")==command["action"] and
-        item.get("version")==command["version"] and
-        item.get("resourceType")==command["resource"]["type"]
-        for item in catalog.body.get("actions",[])
-    )
-    if not supported:
-        return False,"action absent from authenticated platform catalog"
+        return False,"runtime manifest network unavailable"
+    legacy = status==404  # Only unsupported legacy platform permits explicit old policy.
+    if not legacy:
+        if status!=200:
+            return False,"runtime manifest unavailable or invalid"
+        decision,reason=PolicyEngine(sender.db,sender.config).evaluate(
+            row["actor"],command,manifest)
+        if decision!="ALLOW":
+            return False,decision+":"+reason
+    else:
+        if is_community:
+            # Legacy v1 community actions were registered only for the
+            # actor and still require all old local Owner prohibitions.
+            pass
+        elif (command["action"] not in sender.config.allowed_platform_actions):
+            return False,"legacy action not explicitly enabled"
+        try:
+            catalog=sender.client.request("GET","/api/v1/agent/actions")
+        except Exception:
+            return False,"legacy action catalog unavailable"
+        if (catalog.status!=200 or not isinstance(catalog.body,dict) or
+                catalog.body.get("actorId")!=row["actor"] or
+                catalog.body.get("protocolVersion")!="1" or not any(
+                    isinstance(x,dict) and x.get("name")==command["action"] and
+                    x.get("version")==command["version"] and
+                    x.get("resourceType")==resource["type"]
+                    for x in catalog.body.get("actions",[]))):
+            return False,"legacy catalog identity or action mismatch"
     path="/api/v1/agent/resources/"+quote(resource["type"],safe="")+"/"+quote(resource["id"],safe="")
     try:
         resolved=sender.client.request("GET",path)
     except Exception:
-        return False,"resource scope lookup failed"
+        return False,"resource authorization lookup failed"
     if resolved.status!=200 or not isinstance(resolved.body,dict):
         return False,"resource currently inaccessible"
     if (resolved.body.get("type")!=resource["type"] or
             resolved.body.get("id")!=resource["id"]):
         return False,"resource scope identity mismatch"
-    if resource["type"] in ("community","circle","post"):
-        # A circle action may post into the same underlying group chat; do
-        # not allow it to bypass an Owner prohibition on that chat ID.
+    if is_community:
         if resource["type"]=="circle":
             linked_chat=resolved.body.get("chatId")
-            if (not isinstance(linked_chat,str) or not linked_chat):
+            if not isinstance(linked_chat,str) or not linked_chat:
                 return False,"circle linked chat identity unavailable"
             if linked_chat in sender.config.blocked_chat_ids:
                 return False,"linked chat explicitly blocked by Owner"
-        # A public social directory entry is not permission to write.
-        # Identity, current membership and author checks remain enforced
-        # by the platform action handler at execution.
         if resource["type"]=="community" and resource["id"]!="community":
             return False,"unknown virtual community resource"
         if (resource["type"]=="circle" and
                 command["action"]=="community.circle.message" and
                 resolved.body.get("joined") is not True):
             return False,"circle message requires current membership"
-    elif resolved.body.get("projectId") not in sender.config.allowed_project_action_ids:
-        return False,"resource outside explicit project write scope"
+    elif legacy and resolved.body.get("projectId") not in sender.config.allowed_project_action_ids:
+        return False,"legacy resource outside explicit write scope"
     return True,None
 
 
