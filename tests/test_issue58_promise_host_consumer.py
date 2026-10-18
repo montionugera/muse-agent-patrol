@@ -152,7 +152,8 @@ class PromiseHostConsumerTests(unittest.TestCase):
     def test_no_false_cooldown_when_next_step_not_due(self):
         self.create("research","future")
         with self.db.transaction() as c:
-            c.execute("UPDATE promises SET next_action_at=1050 WHERE source_message_id='msg-future'")
+            c.execute("""UPDATE promises SET next_action_at=1050, start_by=1100
+                WHERE source_message_id='msg-future'""")
             c.execute("""UPDATE schedule_activities SET logical_key=(
                 'promise_due:'||(SELECT id FROM promises WHERE source_message_id='msg-future')||':1050.0'
                 ) WHERE kind='promise'""")
