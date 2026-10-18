@@ -104,6 +104,78 @@ class MuseConsumer:
                 "next_step":"reason with the actual Muse model; use fenced stage/outbox-drain and muse-finish",
                 "remote_action_issued":False}
 
+    def renew_liveness(self, wakeup_id, generation, worker, activity_id,
+                       activity_generation, work_lease_version, now, evidence):
+        """Atomically renew Queue AND Scheduler, without claiming business progress.
+
+        Only an already-started, live, generation-matched Worker can attest
+        its own liveness. Neither a heartbeat nor an expired lease proves a
+        remote action absent. The soft scheduling slice is NEVER extended:
+        a preempted Worker must reach a safe point and checkpoint/yield.
+        """
+        if (not isinstance(evidence,dict) or set(evidence)!={"observation_seq","host_session"} or
+                type(evidence["observation_seq"]) is not int or evidence["observation_seq"]<1 or
+                not isinstance(evidence["host_session"],str) or
+                not 1<=len(evidence["host_session"])<=128):
+            raise ValueError("liveness requires increasing observation_seq and host_session")
+        if (not isinstance(worker,str) or not 1<=len(worker)<=128 or
+                type(work_lease_version) is not int or work_lease_version<1):
+            raise ValueError("stable worker and work generation required")
+        with self.db.transaction() as c:
+            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(wakeup_id,)).fetchone()
+            if not wake or not Wakeups._worker_intent_valid(c,wake,generation):
+                raise StaleLease("current Host intent generation required")
+            a=self.scheduler._owned(c,activity_id,worker,activity_generation,now)
+            if a["work_id"]!=wake["source_id"] or a["kind"]!="work":
+                raise StaleLease("Scheduler activity differs from notified work")
+            w=c.execute("""SELECT lease_until FROM work_items
+                WHERE id=? AND type='human_action' AND status='running'
+                AND lease_owner=? AND lease_version=? AND lease_until>?""",
+                (wake["source_id"],worker,work_lease_version,now)).fetchone()
+            if not w:
+                raise StaleLease("expired or wrong-generation Queue lease")
+            x=c.execute("""SELECT * FROM wakeup_execution_receipts
+                WHERE wakeup_id=? AND worker=? AND activity_id=?""",
+                (wakeup_id,worker,activity_id)).fetchone()
+            if not x or x["status"] not in ("started","progress") or (
+                    x["wakeup_generation"]!=generation or
+                    x["activity_generation"]>activity_generation):
+                raise StaleLease("Worker must already have started this Host intent")
+            prev=c.execute("SELECT * FROM worker_lease_heartbeats WHERE wakeup_id=?",
+                           (wakeup_id,)).fetchone()
+            if prev and (prev["worker"]!=worker or
+                         prev["wakeup_generation"]!=generation or
+                         prev["activity_id"]!=activity_id or
+                         prev["activity_generation"]>activity_generation or
+                         prev["work_lease_version"]!=work_lease_version or
+                         evidence["observation_seq"]<=prev["observation_seq"] or
+                         evidence["host_session"]!=json.loads(prev["evidence"])["host_session"]):
+                raise StaleLease("stale, duplicate, or different Host liveness observation")
+            lease_until=now+self.scheduler.lease_seconds
+            c.execute("""UPDATE schedule_activities SET lease_until=?,
+                last_updated=? WHERE id=? AND status='running' AND lease_owner=?
+                AND lease_version=?""",(lease_until,now,activity_id,worker,activity_generation))
+            c.execute("""UPDATE work_items SET lease_until=?
+                WHERE id=? AND status='running' AND lease_owner=?
+                AND lease_version=?""",(lease_until,wake["source_id"],worker,work_lease_version))
+            c.execute("""INSERT INTO worker_lease_heartbeats(
+                wakeup_id,worker,wakeup_generation,activity_id,
+                activity_generation,work_lease_version,observation_seq,
+                last_observed_at,evidence) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(wakeup_id) DO UPDATE SET
+                activity_generation=excluded.activity_generation,
+                observation_seq=excluded.observation_seq,
+                last_observed_at=excluded.last_observed_at,evidence=excluded.evidence""",
+                (wakeup_id,worker,generation,activity_id,activity_generation,
+                 work_lease_version,evidence["observation_seq"],now,canonical(evidence)))
+            return {"status":"lease_renewed","lease_until":lease_until,
+                    "worker_liveness_observed":True,
+                    "business_progress_recorded":False,
+                    "host_accepted_inferred":False,
+                    "remote_action_issued":False,
+                    "safe_point_yield_recommended":bool(
+                        a["preempt_requested"] or a["slice_until"]<=now)}
+
     def finish(self, wakeup_id, generation, worker, activity_id,
                activity_generation, work_lease_version, now, evidence):
         """Atomically finish work/scheduler/execution only after confirmed Outbox.
