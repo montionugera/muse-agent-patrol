@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "agent": {
+    "id": "muse-worker",
+    "role": "worker",
+    "host_instance": "hatch-main"
+  },
+  "crewquay": {
+    "base_url": "https://mxrlyy.asia",
+    "actor_id": "muse-worker",
+    "credential_ref": "secret://crewquay/agent",
+    "required_scopes": [
+      "authorized_project_tasks"
+    ],
+    "required": true
+  },
+  "github": {
+    "auth_type": "fine_grained_pat",
+    "credential_ref": "secret://github/pat",
+    "repositories": [
+      "fantasywinter207/muse-agent-patrol"
+    ],
+    "permissions": {
+      "contents": "write",
+      "issues": "read",
+      "pull_requests": "write"
+    },
+    "policy": {
+      "allow_pr_create": true,
+      "allow_pr_merge": false,
+      "allow_direct_main_push": false
+    },
+    "required": false
+  },
+  "runtime": {
+    "state_dir": "~/.muse/state/muse-worker/hatch-main",
+    "config_path": "~/.muse/state/muse-worker/hatch-main/runtime.json",
+    "database": "~/.muse/state/muse-worker/hatch-main/patrol.sqlite3",
+    "hook": {
+      "provider": "hatch",
+      "interval_seconds": 60
+    },
+    "required": true
+  }
+}

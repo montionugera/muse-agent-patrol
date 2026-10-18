@@ -20,6 +20,7 @@ from ...executor.index import ActionSender
 from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
+from ...setup.index import Manifest, Setup
 from ...scheduling.index import Scheduler
 from ...social.index import SocialOpportunities
 from ...transport.index import Client, credential_provider
@@ -57,6 +58,14 @@ def parser():
     p.add_argument("--config")
     p.add_argument("--db")
     sub=p.add_subparsers(dest="command",required=True)
+    a=sub.add_parser("setup",help="Agent-led one-time deployment, separate from Runtime config")
+    a.add_argument("--manifest",required=True,help="public non-secret deployment JSON manifest")
+    setup_sub=a.add_subparsers(dest="setup_command",required=True)
+    for step in ("init","next","resume","status","verify"):
+        setup_sub.add_parser(step)
+    for action in ("skip-optional","deny"):
+        command=setup_sub.add_parser(action)
+        command.add_argument("--step",required=True)
     sub.add_parser("init")
     sub.add_parser("doctor")
     sub.add_parser("status")
@@ -285,6 +294,24 @@ def parser():
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
+        if args.command=="setup":
+            # No Runtime DB lock, CrewQuay API POST, PAT in args, or HATCH
+            # installation. Every readback is separately evidence-classified.
+            setup=Setup(Manifest.load(args.manifest))
+            if args.setup_command=="init":
+                result=setup.init()
+            elif args.setup_command=="status":
+                result=setup.status()
+            elif args.setup_command in ("next","resume"):
+                result=setup.next()
+            elif args.setup_command=="verify":
+                result=setup.verify()
+            elif args.setup_command=="skip-optional":
+                result=setup.skip_optional(args.step)
+            else:
+                result=setup.deny(args.step)
+            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+            return 0
         cfg=load_config(args.config,database=args.db)
         if args.command=="runtime-cycle":
             # The coordinator is the parent of phase CLIs, so it must NOT hold
