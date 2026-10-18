@@ -257,6 +257,64 @@ class Wakeups:
                             "lease_until":leased["lease_until"],"host_called":False}
         return None
 
+    def prepare_best_effort(self, source_id, now, capability_source="hatch-native-wake/v1"):
+        """Durably throttle a wake *intention* without consuming the Host ACK lease.
+
+        Wake may crash before/after a real call, so the outcome is always
+        unknown until the worker starts. No fake accepted Host receipt is made.
+        Old unknown delivery rows remain untouched and can be used to resume.
+        """
+        if not isinstance(source_id,str) or not source_id or not isinstance(capability_source,str) or not capability_source:
+            raise ValueError("valid host intent source and capability origin required")
+        with self.db.transaction() as c:
+            work=c.execute("""SELECT status,next_action_at FROM work_items
+                WHERE id=? AND type='human_action'""",(source_id,)).fetchone()
+            if not work or work["status"] not in ("pending","retry_wait") or work["next_action_at"]>now:
+                return None
+            row=c.execute("""SELECT * FROM wakeup_requests
+                WHERE source_type='work' AND source_id=?
+                  AND status IN ('pending','retry_wait','unknown')
+                ORDER BY created_at LIMIT 1""",(source_id,)).fetchone()
+            if not row or (row["status"]=="retry_wait" and row["next_attempt_at"]>now):
+                return None
+            prev=c.execute("SELECT * FROM host_wakeup_notifications WHERE wakeup_id=?",
+                           (row["id"],)).fetchone()
+            if prev and (prev["next_notice_at"]>now or prev["worker_started_at"] is not None):
+                return None
+            # One durable unique key per request. Overlapping Hooks cannot
+            # issue duplicate advice; the next call stays cooled down.
+            gen=prev["generation"]+1 if prev else 1
+            attempts=prev["attempts"]+1 if prev else 1
+            delay=min(900,60*(2**min(4,attempts-1)))
+            c.execute("""INSERT INTO host_wakeup_notifications(
+                wakeup_id,generation,attempts,intent_at,next_notice_at,
+                capability,capability_source,outcome)
+                VALUES(?,?,?,?,?,'best_effort',?,'unknown')
+                ON CONFLICT(wakeup_id) DO UPDATE SET
+                generation=excluded.generation,attempts=excluded.attempts,
+                intent_at=excluded.intent_at,next_notice_at=excluded.next_notice_at,
+                capability_source=excluded.capability_source,outcome='unknown'""",
+                (row["id"],gen,attempts,now,now+delay,capability_source))
+            return {"wakeup_id":row["id"],"source_id":source_id,
+                    "source_type":"work","lease_version":gen,
+                    "notification_generation":gen,"next_notice_at":now+delay,
+                    "notification_attempt":attempts,
+                    "notification_outcome":"unknown",
+                    "host_capability":"best_effort",
+                    "capability_source":capability_source,
+                    "requires_host_receipt":False,"host_called":False,
+                    "host_acceptance_verified":False}
+
+    @staticmethod
+    def _worker_intent_valid(c, wake, generation):
+        if wake["status"]=="accepted" and wake["lease_version"]==generation:
+            return "reliable_ack"
+        if wake["source_type"]!="work" or wake["status"] not in ("pending","retry_wait","unknown"):
+            return None
+        notice=c.execute("""SELECT generation FROM host_wakeup_notifications
+            WHERE wakeup_id=? AND capability='best_effort'""",(wake["id"],)).fetchone()
+        return "best_effort" if notice and notice["generation"]==generation else None
+
     def acknowledge(self, ident, owner, version, now, result, evidence):
         if result not in ("accepted","confirmed_failed","unknown"):
             raise ValueError("invalid dispatch result")
@@ -305,9 +363,8 @@ class Wakeups:
             raise ValueError("worker execution evidence exceeds 4 KiB")
         with self.db.transaction() as c:
             wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(ident,)).fetchone()
-            if (not wake or wake["status"]!="accepted"
-                    or wake["lease_version"]!=wakeup_generation):
-                raise StaleLease("verified accepted host wake generation required")
+            if not wake or not self._worker_intent_valid(c,wake,wakeup_generation):
+                raise StaleLease("current reliable Host receipt or best-effort worker intent required")
             activity=c.execute("SELECT * FROM schedule_activities WHERE id=?",
                                (activity_id,)).fetchone()
             if not activity:
@@ -366,6 +423,9 @@ class Wakeups:
                     VALUES(?,?,?,?,?,'started',?,?,?)""",
                     (ident,wakeup_generation,activity_id,activity_generation,
                      worker,now,now,payload))
+                c.execute("""UPDATE host_wakeup_notifications
+                    SET worker_started_at=COALESCE(worker_started_at,?)
+                    WHERE wakeup_id=? AND generation=?""",(now,ident,wakeup_generation))
         return {"wakeup_id":ident,"phase":phase,"already_recorded":False,
                 "remote_action_confirmed":False}
 
