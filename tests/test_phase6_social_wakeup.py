@@ -197,17 +197,17 @@ class SocialWakeTests(unittest.TestCase):
         hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
         content=hook.read_text(encoding="utf-8")
         self.assertNotIn("CREWQUAY_SOCIAL_IDLE_ENABLED",content)
-        self.assertIn("social-sync --if-idle-due",content)
-        # Host's native wake() is only best-effort unless a real adapter
-        # provides an independent, validated acceptance receipt.
+        self.assertIn("runtime-cycle",content)
         self.assertNotIn("CREWQUAY_HOST_WAKEUP_WIRED",content)
         self.assertIn("CREWQUAY_HOST_CAPABILITY",content)
-        self.assertLess(content.index("CREWQUAY_HOST_CAPABILITY"),
-                        content.index("host-wakeup-prepare"))
-        self.assertNotIn("--include-social",content)
-        self.assertLess(content.index("tick --light"),content.index("social-sync --if-idle-due"))
-        self.assertLess(content.index("social-sync --if-idle-due"),
-                        content.index("host-wakeup-prepare"))
+        for forbidden in ("social-sync --if-idle-due","tick --light",
+                          "host-wakeup-prepare","deployment-ensure",
+                          "platform-auth-bootstrap","outbox-drain --once"):
+            self.assertNotIn(forbidden,content)
+        cycle=Path(__file__).resolve().parents[1]/"patrol/components/runtime/composition/cycle.py"
+        runtime=cycle.read_text(encoding="utf-8")
+        self.assertIn('"social-sync","--if-idle-due"',runtime)
+        self.assertIn('"host-wakeup-prepare"',runtime)
         self.assertNotIn("wakeup-ack --result accepted",content)
         if os.name=="posix" and shutil.which("bash"):
             syntax=subprocess.run(["bash","-n",str(hook)],capture_output=True,text=True)
@@ -243,25 +243,20 @@ class SocialWakeTests(unittest.TestCase):
                 CREWQUAY_HOOK_LOCK=str(folder/"hook.lock"),
                 MOCK_CALLS=str(calls),
                 PATH=str(bin_dir)+os.pathsep+os.environ.get("PATH",""))
-            # Best-effort needs no invented Host receipt or operator flag.
+            # The mocked Python returns no parseable Runtime advice. No
+            # fabricated Host acceptance, and only one Runtime invocation.
             env.pop("CREWQUAY_HOST_CAPABILITY",None)
             result=subprocess.run(["bash",str(hook)],env=env,
                                   capture_output=True,text=True,timeout=12)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertIn('"status":"idle"',result.stdout)
             commands=calls.read_text(encoding="utf-8").splitlines()
-            # Phase 7 bootstraps a deployment run inside the same original
-            # Hook, without leasing or faking a Host wake-up.
-            self.assertGreaterEqual(len(commands),6,commands)
-            self.assertIn("tick --light",commands[0])
-            self.assertRegex(commands[1],r"deployment-ensure --repo-sha [0-9a-f]{40}")
-            self.assertIn("platform-auth-bootstrap --deployment-run-id",commands[2])
-            self.assertIn("--if-due",commands[2])
-            self.assertIn("outbox-drain --once --lane any",commands[3])
-            self.assertIn("social-sync --if-idle-due",commands[4])
-            self.assertTrue(any(
-                "host-wakeup-prepare" in x and "--host-capability best_effort" in x
-                for x in commands))
+            self.assertGreaterEqual(len(commands),1,commands)
+            self.assertIn("runtime-cycle --owner",commands[0])
+            self.assertIn("--host-capability best_effort",commands[0])
+            self.assertFalse(any("deployment-ensure" in x or
+                                 "platform-auth-bootstrap" in x or
+                                 "host-wakeup-prepare" in x for x in commands))
             self.assertNotIn("SHOULD_NOT_WAKE",result.stdout)
 
     def test_old_work_promise_database_migrates_without_losing_lease_history(self):
