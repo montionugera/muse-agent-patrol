@@ -707,6 +707,28 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertLess(priority(waiting,1000+518400),priority(running,1000+518400,running=True))
         self.assertIsNone(preemption(running,waiting,1000+518400))
 
+    def test_issue45_six_day_backlog_does_not_fence_new_owner_claim(self):
+        # End-to-end regression for the production grant -> immediate
+        # preempt_requested -> work-claim StaleLease loop.
+        now=1000+6*86400
+        stale=Queue(self.db).enqueue("issue45:old-social","human_action",
+            {"reason":"stale low-value event"},1000,priority=5)
+        owner=Queue(self.db).enqueue("issue45:new-owner","human_action",
+            {"reason":"new Owner message"},now,priority=85)
+        first=self.scheduler.dispatch("worker-owner",now,for_work_id=owner)
+        self.assertTrue(first["granted"],first)
+        self.assertEqual(first["activity"]["work_id"],owner)
+        self.scheduler.reconcile(now+1)
+        running=self.scheduler.assess(now+1)["running"]
+        self.assertEqual(running["work_id"],owner)
+        self.assertFalse(running["preempt_requested"])
+        claim=Queue(self.db).claim_specific(owner,"worker-owner",now+2,
+                                            {"approved_by":"Owner"})
+        self.assertEqual(claim["scheduler_activity_id"],running["id"])
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(stale,))[0]["status"],
+            "pending")
+
     def test_imminent_deadline_protected_from_aged_nonurgent_activity(self):
         imminent=self.add("hard-due","work",now=1000,score=70,deadline=1015)
         waiting=self.add("old-background","maintenance",now=0,score=5)
