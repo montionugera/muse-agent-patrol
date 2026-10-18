@@ -273,6 +273,18 @@ class Database:
                 capability_source TEXT NOT NULL,
                 outcome TEXT NOT NULL CHECK(outcome='unknown'),
                 worker_started_at REAL)""")
+            # Heartbeats prove only that the fenced Worker called back; they
+            # do not assert business progress or confirmed remote effects.
+            c.execute("""CREATE TABLE IF NOT EXISTS worker_lease_heartbeats(
+                wakeup_id TEXT PRIMARY KEY REFERENCES wakeup_requests(id),
+                worker TEXT NOT NULL,
+                wakeup_generation INTEGER NOT NULL,
+                activity_id TEXT NOT NULL REFERENCES schedule_activities(id),
+                activity_generation INTEGER NOT NULL,
+                work_lease_version INTEGER NOT NULL,
+                observation_seq INTEGER NOT NULL,
+                last_observed_at REAL NOT NULL,
+                evidence TEXT NOT NULL)""")
             c.execute("INSERT INTO meta(key,value) VALUES('schema_version','2') "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         if os.name == "posix":

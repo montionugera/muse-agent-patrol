@@ -173,6 +173,14 @@ def parser():
     a.add_argument("--wakeup-id",required=True)
     a.add_argument("--wakeup-generation",type=int,required=True)
     a.add_argument("--worker",required=True)
+    a=sub.add_parser("muse-lease-renew")
+    a.add_argument("--wakeup-id",required=True)
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
+    a.add_argument("--activity-id",required=True)
+    a.add_argument("--activity-generation",type=int,required=True)
+    a.add_argument("--work-lease-version",type=int,required=True)
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("muse-finish")
     a.add_argument("--wakeup-id",required=True)
     a.add_argument("--wakeup-generation",type=int,required=True)
@@ -608,6 +616,11 @@ def main(argv=None):
             elif args.command=="muse-consume":
                 result=MuseConsumer(db,cfg.lease_seconds,cfg).consume(
                     args.wakeup_id,args.wakeup_generation,args.worker,now)
+            elif args.command=="muse-lease-renew":
+                result=MuseConsumer(db,cfg.lease_seconds).renew_liveness(
+                    args.wakeup_id,args.wakeup_generation,args.worker,
+                    args.activity_id,args.activity_generation,args.work_lease_version,
+                    now,evidence(args.evidence))
             elif args.command=="muse-finish":
                 result=MuseConsumer(db,cfg.lease_seconds).finish(
                     args.wakeup_id,args.wakeup_generation,args.worker,
