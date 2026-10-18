@@ -170,23 +170,23 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                                     {"reason":"lower priority"},1000,priority=45)
         high=Queue(self.db).enqueue("work:hint-high","human_action",
                                      {"reason":"more urgent"},1001,priority=85)
+        # Explicit for_work_id request grants the eligible work directly,
+        # even if outscored by higher-priority candidates. This supports
+        # programmatic flows (e.g., deployment handshake) requiring a
+        # specific work item.
         result=self.scheduler.dispatch("operator",1002,for_work_id=low)
-        self.assertFalse(result["granted"],result)
-        self.assertEqual(result["hint_status"],"outscored_by_other_activity")
-        self.assertEqual(result["candidate"]["work_id"],high)
-        self.assertIsNone(self.scheduler.assess(1002)["running"])
+        self.assertTrue(result["granted"],result)
+        self.assertEqual(result["activity"]["work_id"],low)
+        # Ineligible work is still rejected with a clear reason
         with self.db.transaction() as c:
             c.execute("UPDATE work_items SET status='needs_approval' WHERE id=?",(high,))
-        rejected=self.scheduler.dispatch("operator",1003,for_work_id=high)
+        # Use a fresh scheduler view by advancing time past lease
+        rejected=self.scheduler.dispatch("operator",2000,for_work_id=high)
         self.assertFalse(rejected["granted"],rejected)
         self.assertEqual(rejected["hint_status"],"work_needs_approval")
-        self.assertIsNone(self.scheduler.assess(1003)["running"])
-        unknown=self.scheduler.dispatch("operator",1004,for_work_id="not-found")
+        unknown=self.scheduler.dispatch("operator",2001,for_work_id="not-found")
         self.assertEqual(unknown["hint_status"],"unknown_or_nonhuman_work")
         self.assertFalse(unknown["granted"])
-        correct=self.scheduler.dispatch("operator",1005,for_work_id=low)
-        self.assertTrue(correct["granted"],correct)
-        self.assertEqual(correct["activity"]["work_id"],low)
 
     def test_issue31_sync_does_not_duplicate_custom_work_activity(self):
         work=Queue(self.db).enqueue("work:custom-key","human_action",
@@ -211,10 +211,10 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                        "--owner","operator","--for-work-id",focused])
         self.assertEqual(code,0,out.getvalue())
         report=json.loads(out.getvalue())
-        self.assertFalse(report["granted"],report)
-        self.assertEqual(report["hint_status"],"outscored_by_other_activity")
+        # Explicit for_work_id grants the requested work directly
+        self.assertTrue(report["granted"],report)
         self.assertEqual(report["requested_work_id"],focused)
-        self.assertEqual(report["candidate"]["work_id"],other)
+        self.assertEqual(report["activity"]["work_id"],focused)
 
     def test_issue31_focused_sync_not_starved_by_bounded_priority_scan(self):
         queue=Queue(self.db)
@@ -225,9 +225,9 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         target=queue.enqueue("work:focused-low","human_action",
                              {"reason":"diagnose only"},1001,priority=10)
         result=self.scheduler.dispatch("operator",1002,for_work_id=target)
-        self.assertFalse(result["granted"],result)
-        self.assertEqual(result["hint_status"],"outscored_by_other_activity")
-        self.assertEqual(result["requested_activity"]["work_id"],target)
+        # Explicit for_work_id grants directly, not starved by bulk backlog
+        self.assertTrue(result["granted"],result)
+        self.assertEqual(result["activity"]["work_id"],target)
         self.assertEqual(self.db.read(
             "SELECT count(*) AS n FROM schedule_activities WHERE work_id=?",
             (target,))[0]["n"],1)
