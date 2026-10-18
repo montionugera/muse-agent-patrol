@@ -57,7 +57,7 @@ python3 -m patrol setup --manifest /PRIVATE/deployment.json resume
 python3 -m patrol setup --manifest /PRIVATE/deployment.json verify
 ```
 
-Setup 在每 Agent + 每宿主专用的 `setup.sqlite3` 保存状态、清单 revision、逻辑凭据引用与加盐指纹，不保存 PAT 明文；检查已存在的授权，避免每 60 秒 Hook 重新索取。GitHub 只读认证/仓库探测**不能证明写入权限或服务端 main 分支保护**，需要在正式可授权的写入动作时验证；配置期待权限 ≠ 实际平台 grant。现有 Runtime `config.example.json` 和 `Config` 仍是业务运行的唯一配置，不接受新部署字段。**HATCH Hook 绝不调用 Setup**。从平台握手到真实 Host/Worker 运行仍需独立验收，Setup 状态不意味着 `DEPLOYMENT_VERIFIED`。
+Setup 在每 Agent + 每宿主专用的 `setup.sqlite3` 保存状态、清单 revision、逻辑凭据引用与加盐指纹，不保存 PAT 明文；检查已存在的授权，避免每 60 秒 Hook 重新索取。 GitHub 开发动作通过独立的 [Fine-grained PAT GitHub 适配器](patrol/components/github/README.md) 与官方 REST API 执行；支持指定仓库的 Issue、开发分支、PR 和 Planner 合并，原始请求采用 SQLite 不可变逻辑键，网络未知不盲目重发。真实写权限仍由 GitHub 服务端授权/Ruleset 复核。GitHub 只读认证/仓库探测**不能证明写入权限或服务端 main 分支保护**，需要在正式可授权的写入动作时验证；配置期待权限 ≠ 实际平台 grant。现有 Runtime `config.example.json` 和 `Config` 仍是业务运行的唯一配置，不接受新部署字段。**HATCH Hook 绝不调用 Setup**。从平台握手到真实 Host/Worker 运行仍需独立验收，Setup 状态不意味着 `DEPLOYMENT_VERIFIED`。
 
 ## 正式授权与主动部署（Issue #37）
 

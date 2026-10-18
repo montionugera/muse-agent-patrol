@@ -96,7 +96,7 @@ class Setup:
         ref,fingerprint=self._fingerprint(c,step)
         same=(prev and prev["reason"]==check["reason"] and
               prev["status"]==check["status"] and
-              prev["revision"]==self.manifest.revision and
+              prev["revision"]==self.manifest.step_revision(step) and
               prev["credential_fingerprint"]==fingerprint)
         asked=(prev["asked_at"] if same else None) if prev else None
         tries=prev["tries"]+1 if prev else 1
@@ -110,7 +110,7 @@ class Setup:
              credential_ref=excluded.credential_ref,
              credential_fingerprint=excluded.credential_fingerprint""",
              (step,check["status"],check["reason"],check["next_action"],
-              self.manifest.revision,asked,now,tries,ref,fingerprint))
+              self.manifest.step_revision(step),asked,now,tries,ref,fingerprint))
         return (not same or not asked)
 
     def init(self):
@@ -135,7 +135,7 @@ class Setup:
             report=[]
             for step in _ORDER:
                 row=rows.get(step)
-                current=(row is not None and row["revision"]==self.manifest.revision)
+                current=(row is not None and row["revision"]==self.manifest.step_revision(step))
                 status=row["status"] if current else "not_checked"
                 report.append({"step":step,"required":self._required(step),
                     "status":status,
@@ -164,13 +164,13 @@ class Setup:
         try:
             current=c.execute("SELECT * FROM setup_steps WHERE step=?",(step,)).fetchone()
             if (current and current["status"]=="denied" and
-                    current["revision"]==self.manifest.revision):
+                    current["revision"]==self.manifest.step_revision(step)):
                 return {"step":step,"required":self._required(step),
                         "status":"denied","reason":"OWNER_DECLINED_PREVIOUS_REQUEST",
                         "next_action":"await_trusted_owner_decision",
                         "prompt_new":False}
             if (current and current["status"]=="skipped_optional" and
-                    current["revision"]==self.manifest.revision):
+                    current["revision"]==self.manifest.step_revision(step)):
                 return {"step":step,"required":False,"status":"skipped_optional",
                         "reason":"OPTIONAL_DEFERRED","next_action":"none","prompt_new":False}
         finally:
@@ -211,22 +211,57 @@ class Setup:
 
     def verify(self):
         now=self.clock()
-        # Safe read-only checks for each independent component. This is not
-        # a fake real Host acceptance and never writes remote mutations.
-        return {"observations":[self._check_one(step,now) for step in _ORDER],
-                "state":self.status()}
+        # Diagnostics do not deliver Owner requests. In particular, do NOT
+        # mark all missing credentials 'asked' when the Agent runs verify:
+        # next() remains the sole one-item-at-a-time notification gate.
+        observations=[]
+        c=self._connect()
+        try:
+            for step in _ORDER:
+                check=self.probes.check(step)
+                if (not isinstance(check,dict) or
+                        set(check)!={"status","reason","next_action"}):
+                    raise ValueError("invalid safe setup probe result")
+                with c:
+                    current=c.execute("SELECT status,revision FROM setup_steps WHERE step=?",
+                                      (step,)).fetchone()
+                    if current and current["revision"]==self.manifest.step_revision(step) and (
+                            current["status"] in ("denied","skipped_optional")):
+                        observations.append({"step":step,"status":current["status"],
+                                             "prompt_new":False})
+                        continue
+                    self._set(c,step,check,now)
+                observations.append({"step":step,**check,"prompt_new":False})
+        finally:
+            c.close()
+        return {"observations":observations,"state":self.status(),
+                "owner_contact_required":False,"remote_action_issued":False}
 
     def skip_optional(self,step):
         if step not in _ORDER or self._required(step):
             raise ValueError("cannot skip a required or unknown setup step")
+        # Optional subsystems are indivisible dependencies: skipping the
+        # optional PAT credential also skips repository/permission probes.
+        # Otherwise a disabled GitHub integration would block Setup forever.
+        if step.startswith("github_"):
+            group=("github_credential","github_repositories","github_permissions")
+        elif step.startswith("crewquay_") or step=="deployment_handshake":
+            group=("crewquay_identity","crewquay_scopes","deployment_handshake")
+        else:
+            group=(step,)
+        if any(self._required(x) for x in group):
+            raise ValueError("cannot disable a required setup dependency")
         c=self._connect()
         try:
             now=self.clock()
             with c:
-                self._set(c,step,{"status":"skipped_optional","reason":"OPTIONAL_DEFERRED",
-                                 "next_action":"none"},now)
-            return {"step":step,"status":"skipped_optional",
-                    "grants_changed":False,"remote_action_issued":False}
+                for name in group:
+                    self._set(c,name,{"status":"skipped_optional",
+                                      "reason":"OPTIONAL_DEFERRED",
+                                      "next_action":"none"},now)
+            return {"step":step,"skipped_steps":list(group),
+                    "status":"skipped_optional","grants_changed":False,
+                    "remote_action_issued":False}
         finally:
             c.close()
 

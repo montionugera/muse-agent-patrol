@@ -90,13 +90,56 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(third["host_deployment_verified"])
         self.assertEqual(self.setup.status()["status"],"ready_for_external_e2e")
 
+    def test_verify_does_not_mass_prompt_or_consume_future_one_step_request(self):
+        self.setup.init()
+        for step in ("crewquay_identity","github_credential"):
+            self.probes.overrides[step]=observation(
+                "awaiting_user","SECURE_SECRET_INPUT_REQUIRED",
+                "request_one_secure_credential_import")
+        report=self.setup.verify()
+        self.assertFalse(report["owner_contact_required"])
+        self.assertFalse(any(x["prompt_new"] for x in report["observations"]))
+        self.assertTrue(all(x["asked_at"] is None for x in self.setup.status()["steps"]))
+        first=self.setup.next()
+        self.assertEqual(first["current"]["step"],"crewquay_identity")
+        self.assertTrue(first["owner_contact_required"])
+        self.probes.overrides["crewquay_identity"]=observation(
+            "verified","SIGNED_GRANT_FIXTURE")
+        second=self.setup.next()
+        self.assertEqual(second["current"]["step"],"github_credential")
+        self.assertTrue(second["owner_contact_required"])
+
+    def test_scoped_manifest_edit_retains_unrelated_permission_prompt(self):
+        self.setup.init()
+        self.probes.overrides["crewquay_identity"]=observation(
+            "awaiting_user","SECURE_SECRET_INPUT_REQUIRED",
+            "request_one_secure_crewquay_credential_import")
+        prior=self.setup.next()
+        self.assertTrue(prior["owner_contact_required"])
+        data=fixture(self.root)
+        data["github"]["permissions"]["issues"]="write"
+        revised=Manifest(data)
+        restarted=Setup(revised,probes=self.probes,clock=lambda:1060)
+        saved={x["step"]:x for x in restarted.status()["steps"]}
+        self.assertEqual(saved["crewquay_identity"]["status"],"awaiting_user")
+        self.assertIsNotNone(saved["crewquay_identity"]["asked_at"])
+        self.assertEqual(saved["github_permissions"]["status"],"not_checked")
+        again=restarted.next()
+        self.assertEqual(again["current"]["step"],"crewquay_identity")
+        self.assertFalse(again["owner_contact_required"])
+
     def test_optional_skip_cannot_bypass_required(self):
         self.setup.init()
         with self.assertRaises(ValueError):
             self.setup.skip_optional("crewquay_identity")
         result=self.setup.skip_optional("github_credential")
         self.assertEqual(result["status"],"skipped_optional")
+        self.assertEqual(result["skipped_steps"],
+                         ["github_credential","github_repositories","github_permissions"])
         self.assertEqual(result["grants_changed"],False)
+        self.assertTrue(all(x["status"]=="skipped_optional"
+                            for x in self.setup.status()["steps"]
+                            if x["step"].startswith("github_")))
         self.probes.overrides["native_hatch"]=observation(
             "unverified","NATIVE_HATCH_REGISTRATION_NOT_OBSERVED",
             "agent_check_real_native_hook_registration_and_3_ticks")
