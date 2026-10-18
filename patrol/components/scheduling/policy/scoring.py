@@ -10,15 +10,18 @@ def priority(row, now, *, running=False):
         remaining=float(deadline)-now
         urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
     ready_since=float(row["ready_since"])
-    # The initial aging ramp is bounded to limit short-term thrashing. A
-    # second, slower credit helps moderate priority gaps. Both cap at 30:
-    # aging saturates at 60 after 45 minutes, so six-day-old work cannot
-    # accumulate the ~17000-point bonus that caused issue #45's immediate
-    # grant -> preempt -> StaleLease livelock. This is bounded fairness,
-    # NOT a guarantee against starvation under an endless stream of much
-    # higher-priority work. Each granted slice resets ready_since on yield.
-    wait=max(0.0,now-ready_since)
-    aging=0.0 if running else min(30.0,wait/90.0)+min(30.0,max(0.0,wait-900.0)/30.0)
+    # Waiting credit is bounded (<=60) and belongs to the slice that won
+    # dispatch. Dropping it to zero immediately after grant lets another
+    # equally old activity win the next tick and fence work-claim before the
+    # Agent starts. Freeze the earned credit at last_started_at while running;
+    # do not accrue additional waiting credit during execution. On yield the
+    # dispatcher resets ready_since, so the next turn earns credit afresh.
+    # This is finite fairness, not starvation freedom under arbitrary load.
+    started=(row["last_started_at"] if "last_started_at" in row.keys() else None)
+    age_until=(min(now,float(started)) if running and started is not None
+               else ready_since if running else now)
+    wait=max(0.0,age_until-ready_since)
+    aging=min(30.0,wait/90.0)+min(30.0,max(0.0,wait-900.0)/30.0)
     fair=min(34.0,max(0.0,float(row["virtual_runtime"])/60.0))
     # Do not thrash on small priority changes. Existing work retains some
     # continuity, while new resumptions pay a measured local restore penalty.
@@ -50,6 +53,19 @@ def preemption(running, challenger, now):
     # urgency-sensitive override; expired slices permit fair rotation.
     if remaining<=30 and other_score>=active_score-8:
         return "urgent_safe_point"
+    # Waiting credit preserves a newly granted slice, but must not mask a
+    # genuinely more important fresh Owner/action. Compare intrinsic urgency
+    # independently of age; a large base/deadline gap is preemptible even
+    # when the running slice won with maximum waiting credit.
+    running_core=float(running["base_priority"])+(
+        75.0 if running_deadline is not None and running_deadline<=now else
+        max(0.0,75.0*(1.0-(running_deadline-now)/3600.0))
+        if running_deadline is not None else 0.0)
+    other_core=float(challenger["base_priority"])+(
+        75.0 if remaining<=0 else
+        max(0.0,75.0*(1.0-remaining/3600.0)) if remaining<math.inf else 0.0)
+    if other_core>=running_core+25:
+        return "medium_safe_point"
     if other_score>=active_score+12+min(8.0,float(running["switch_cost"])/2):
         return "medium_safe_point"
     if now>=float(running["slice_until"]) and other_score>=active_score-12:
