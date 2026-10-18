@@ -124,6 +124,18 @@ class Queue:
                      authorization_evidence.get("wakeup_generation"))).fetchone()
                 if wake is None:
                     raise StaleLease("Muse handoff requires an accepted matching host wakeup")
+            elif authorization_evidence.get("kind")=="best_effort_host_wakeup":
+                # Worker identity and *live* Scheduler lease are still required;
+                # this check establishes intent provenance, NOT Host accepted.
+                wake=c.execute("""SELECT w.id FROM wakeup_requests w
+                    JOIN host_wakeup_notifications n ON n.wakeup_id=w.id
+                    WHERE w.id=? AND w.source_type='work' AND w.source_id=?
+                      AND w.status IN ('pending','retry_wait','unknown')
+                      AND n.capability='best_effort' AND n.generation=?""",
+                    (authorization_evidence.get("wakeup_id"),ident,
+                     authorization_evidence.get("wakeup_generation"))).fetchone()
+                if wake is None:
+                    raise StaleLease("Muse handoff needs a current best-effort notification intent")
             # Scheduler-controlled work must be claimed by the same worker
             # in the current live time slice; legacy unscheduled work is
             # unchanged. Prevent claiming the underlying Queue in suspension.
