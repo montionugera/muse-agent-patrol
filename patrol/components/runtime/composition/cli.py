@@ -13,8 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
 from ...deployment.index import Deployment
-from ...host.index import HostHandoff
-from ...host.components.consumer import MuseConsumer
+from ...host.index import HostHandoff, MuseConsumer
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
 from ...executor.index import ActionSender
