@@ -5,7 +5,7 @@ Remote side effects live in Outbox and must be reconciled independently.
 """
 import json
 import math
-from .scoring import priority, quantum, preemption
+from .scoring import priority, intrinsic_priority, quantum, preemption
 from .checkpoint import validate as validate_checkpoint
 from ...persistence.index import canonical, new_id, StaleLease
 
@@ -38,7 +38,17 @@ class Scheduler:
 
     @staticmethod
     def _best(rows, now):
-        return max(rows,key=lambda r:(priority(r,now),-float(r["created_at"]),r["id"])) if rows else None
+        if not rows:
+            return None
+        # The bounded 60-point waiting bonus must not make a stale
+        # priority-45 job outrank a newly arrived priority-85 Owner message.
+        # Within a moderate intrinsic-priority band, however, age/virtual
+        # runtime still decide ordering, so old similar-priority work lives.
+        highest=max(intrinsic_priority(row,now) for row in rows)
+        eligible=(row for row in rows
+                  if intrinsic_priority(row,now)>=highest-24)
+        return max(eligible,key=lambda r:(
+            priority(r,now),-float(r["created_at"]),r["id"]))
 
     @staticmethod
     def _public(row,now):
