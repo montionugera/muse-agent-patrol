@@ -240,7 +240,7 @@ class GitHubOperations:
         finally:
             c.close()
         return {"status":result,"remote_id":remote_id,"http_status":status,
-                "reused":False,"new_request_sent":status in (200,201,400,401,403,404,422),
+                "reused":False,"new_request_sent":True,
                 "requires_remote_reconciliation":result=="unknown",
                 "github_server_authoritative":True,
                 "crewquay_action_issued":False}
