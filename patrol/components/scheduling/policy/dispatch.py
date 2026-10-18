@@ -387,6 +387,42 @@ class Scheduler:
             raise StaleLease("activity is no longer owned by this lease generation")
         return dict(row)
 
+    def agent_owned_tx(self,c,ident,owner,generation,now,*,kind,work_id=None):
+        """Public transaction port; caller owns BEGIN IMMEDIATE.
+
+        Never grant a new lease here. Validate the already-running Scheduler
+        generation under the SAME transaction as Queue and Worker receipts.
+        """
+        row=self._owned(c,ident,owner,generation,now)
+        if row["kind"]!=kind or (work_id is not None and row["work_id"]!=work_id):
+            raise StaleLease("Scheduler activity does not match Agent's work intent")
+        return row
+
+    def agent_renew_tx(self,c,row,owner,generation,now):
+        """Extend only the live hard lease, NEVER the fair/preemption slice."""
+        expiry=now+self.lease_seconds
+        n=c.execute("""UPDATE schedule_activities SET lease_until=?,
+            last_updated=? WHERE id=? AND status='running' AND lease_owner=?
+            AND lease_version=? AND lease_until>?""",
+            (expiry,now,row["id"],owner,generation,now)).rowcount
+        if n!=1:
+            raise StaleLease("Scheduler renewal lost generation")
+        return expiry
+
+    def agent_finish_tx(self,c,row,owner,generation,now,evidence):
+        """Commit a verified Agent completion inside the caller transaction."""
+        self.agent_owned_tx(c,row["id"],owner,generation,now,
+                            kind=row["kind"],work_id=row["work_id"])
+        self._charge(c,row,now)
+        n=c.execute("""UPDATE schedule_activities SET status='completed',
+            checkpoint=?,lease_owner=NULL,lease_until=NULL,slice_until=NULL,
+            lease_version=lease_version+1,preempt_requested=0,
+            preempt_mode=NULL,last_updated=? WHERE id=? AND status='running'
+            AND lease_owner=? AND lease_version=?""",
+            (canonical(evidence),now,row["id"],owner,generation)).rowcount
+        if n!=1:
+            raise StaleLease("Scheduler Agent completion lost generation")
+
     def checkpoint(self,ident,owner,generation,now,data,*,voluntary=False):
         if (not isinstance(data,dict) or not data or
                 len(canonical(data).encode("utf-8"))>32768):
