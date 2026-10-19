@@ -1,3 +1,3 @@
-from .delivery.actions import Outbox
+from .delivery.actions import Outbox, NotDispatched
 
-__all__ = ["Outbox"]
+__all__ = ["Outbox", "NotDispatched"]

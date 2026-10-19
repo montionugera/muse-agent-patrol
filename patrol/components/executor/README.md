@@ -38,6 +38,7 @@ Fake transport plus temporary SQLite. CI never calls CrewQuay endpoints or loads
 - Project Room message routes still require `allowed_project_action_ids`; server-side project role rules remain authoritative.
 - `blocked_social_actions`, `blocked_social_resources` and `community_social_enabled` control the *community* Action Protocol and hub posting, with Owner deny taking precedence. These controls do not silently disable general work.
 - Previously sent or ambiguous effects may be reconciled using read-only exact server receipts after an Owner ban; no duplicate POST.
+- A failed pre-POST re-check or a transport error raised before any connection is `NotDispatched` (retry the same key), not `unknown`. An `unknown` chat send without a remote ID closes only via the bounded readback rule in the Outbox README (issue #69).
 - Owners must configure prohibitions in their Agent's trusted private config; external message contents are never permission updates.
 
 ## Phase 4: Platform routes

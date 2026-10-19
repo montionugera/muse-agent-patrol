@@ -11,8 +11,8 @@ from urllib.parse import quote
 from ...attention.index import Attention
 from ...collection.index import Collector, Sync, event_time
 from ...persistence.index import canonical
-from ...outbox.index import Outbox
-from ...transport.index import AuthError
+from ...outbox.index import Outbox, NotDispatched
+from ...transport.index import AuthError, BudgetExceeded
 from .task_actions import TASK_ACTIONS, task_scope, task_path, task_payload, verify_task
 from .platform_actions import can_execute, verify_execution
 from .authorization import live_action_authority
@@ -212,11 +212,18 @@ class ActionSender:
         else:
             path="/api/v1/chats/"+quote(row["target"],safe="")+("/messages" if row["action"]=="send" else "/read")
         # Authorization is checked immediately before every network write.
-        allowed,_=self.can_send(row)
+        # A failed re-check (e.g. a flaky chat GET) never reached the POST, so
+        # it is a retry of the same key, not an ambiguous remote result.
+        allowed,reason=self.can_send(row)
         if not allowed:
-            raise AuthError("authorization changed")
+            raise NotDispatched("authorization changed: "+str(reason))
         payload=task_payload(row) if row["action"] in TASK_ACTIONS else row["payload"]
-        return self.client.request("POST",path,payload,row["idem_key"])
+        try:
+            return self.client.request("POST",path,payload,row["idem_key"])
+        except (AuthError,BudgetExceeded,ValueError) as exc:
+            # The transport raises these only before opening a connection;
+            # anything else (e.g. IncompleteRead) remains ambiguous.
+            raise NotDispatched(type(exc).__name__) from exc
 
     def verify(self,row,response):
         if row["action"]=="deployment_bug":
@@ -330,7 +337,8 @@ class ActionSender:
             return verify_execution(self,row)
         if row["action"] in TASK_ACTIONS:
             return verify_task(self,row,response)
-        # Unknown operations without a stable remote id cannot safely be guessed from matching text.
+        if row["action"]=="send" and response is None and not row.get("remote_id"):
+            return self._reconcile_unattributed_send(row)
         if response is None and row.get("remote_id"):
             response={"messageId":row["remote_id"]}
         if row["action"]=="send" and isinstance(response,dict):
@@ -359,6 +367,62 @@ class ActionSender:
         # ACK/read require an operator's evidence-backed resolution until an exact
         # endpoint-specific readback contract is supplied. Never replay them blindly.
         return None
+
+    def _reconcile_unattributed_send(self,row):
+        """Close an `unknown` chat send that never received a remote ID.
+
+        Similar text alone is not proof. Bind only a UNIQUE message with the
+        exact sender and content, created after staging and not owned by any
+        other Outbox row. Absence is proven only by a complete, all-200 scan
+        after the in-flight window; anything else stays unknown.
+        """
+        if self.db.read("""SELECT 1 FROM outbox WHERE id<>? AND actor=? AND target=?
+                AND payload_hash=? AND status IN ('prepared','retry_wait','sending','unknown')
+                LIMIT 1""",(row["id"],row["actor"],row["target"],row["payload_hash"])):
+            return None
+        claimed={r["remote_id"] for r in self.db.read("""SELECT remote_id FROM outbox
+            WHERE id<>? AND remote_id IS NOT NULL""",(row["id"],))}
+        staged=row["created_at"]-self.config.future_skew_seconds
+        after=str(row.get("verify_cursor") or "0")
+        found=[]
+        for _ in range(self.config.max_pages_per_source):
+            r=self.client.request("GET","/api/v1/chats/"+quote(row["target"],safe="")+"/messages?after="+after+"&limit=100")
+            if r.status!=200 or not isinstance(r.body,dict):
+                return None
+            for item in r.body.get("items",[]):
+                if item.get("senderId")!=row["actor"] or item.get("content")!=row["payload"]["content"]:
+                    continue
+                ident=item.get("messageId") or item.get("id")
+                created=event_time(item.get("createdAt"),None)
+                # Unparsable or future times (e.g. epoch milliseconds) cannot
+                # be ordered against staging: fail closed.
+                if (not ident or created is None or
+                        created>self.clock()+self.config.future_skew_seconds):
+                    return None
+                if created>=staged and str(ident) not in claimed:
+                    found.append((str(ident),item,created))
+            nxt=str(r.body.get("nextCursor",after))
+            try:
+                if int(nxt)<int(after):
+                    return None
+            except ValueError:
+                return None
+            if not found:
+                self.outbox.verified_page(row["id"],nxt)
+            if not r.body.get("hasMore") or nxt==after:
+                break
+            after=nxt
+        else:
+            return None
+        if len(found)==1:
+            ident,item,created=found[0]
+            self.attention.observe(row["target"],"own:"+ident,created,self.clock(),own=True)
+            return {"id":ident,"source":"REST readback: unique unclaimed exact sender/content after staging",
+                    "unclaimed":True,"sha256":hashlib.sha256(canonical(item).encode()).hexdigest()}
+        if found or row.get("dispatch_at") is None or self.clock()-row["dispatch_at"]<self.config.lease_seconds:
+            return None
+        return {"proven_absent":True,"source":"complete REST readback without exact sender/content after staging",
+                "chat":row["target"],"scanned_through":nxt,"dispatch_at":row["dispatch_at"]}
 
     def drain_once(self, limit=3, action_id=None, lane="any"):
         """Deliver only bounded, due durable Outbox actions; NO full patrol.

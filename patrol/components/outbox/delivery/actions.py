@@ -5,6 +5,10 @@ import json
 from ...persistence.index import canonical, new_id, cursor, StaleLease
 
 
+class NotDispatched(RuntimeError):
+    """Raised by a sender only when no network write was attempted."""
+
+
 class Outbox:
     """Discovery never stages writes; actions need an explicit local operator."""
     def __init__(self, db):
@@ -304,7 +308,14 @@ class Outbox:
                     result=verify(row,None)
                 except Exception:
                     result=None
-                if result:
+                if result and result.get("proven_absent") is True:
+                    # Complete readback proved no remote write: the SAME
+                    # immutable request/key becomes eligible again.
+                    try:
+                        self.resolve(row["id"],result,now,proven_absent=True)
+                    except ValueError:
+                        pass
+                elif result:
                     self._confirmed(row["id"],result,verified_at=now)
                 else:
                     with self.db.transaction() as c:
@@ -335,11 +346,19 @@ class Outbox:
                 if not won:
                     continue
                 consumed+=1
+                dispatched=True
                 try:
                     response=send(row)
+                except NotDispatched as exc:
+                    dispatched=False
+                    response=None
+                    self._result(row["id"],token,"retry_wait",now+60,
+                                 "not dispatched: "+str(exc)[:200])
                 except Exception:
                     response=None
-                if response and 200<=response.status<300:
+                if not dispatched:
+                    pass
+                elif response and 200<=response.status<300:
                     # Save remote identity BEFORE readback: ambiguous crashes
                     # must be verified by ID and not blindly reposted.
                     if isinstance(response.body,dict):
@@ -353,7 +372,7 @@ class Outbox:
                         result=verify(row,response.body)
                     except Exception:
                         result=None
-                    if result:
+                    if result and result.get("proven_absent") is not True:
                         self._confirmed(row["id"],result,token,verified_at=now)
                     else:
                         self._result(row["id"],token,"unknown",now+300,
@@ -391,6 +410,11 @@ class Outbox:
                 args.append(token)
             else:
                 sql+=" AND status='unknown'"
+            if evidence.get("unclaimed") is True:
+                # Readback without a stored remote ID may bind only a message
+                # no other Outbox row already owns (checked atomically).
+                sql+=" AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.remote_id=? AND o.id<>?)"
+                args+=[str(evidence.get("id","")),ident]
             c.execute(sql,args)
 
     def _result(self, ident, token, status, next_at, error):

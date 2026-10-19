@@ -43,7 +43,19 @@ The single SQLite Outbox now accepts immutable collaboration actions `project_me
 
 Logical queues `collaboration` and `tasks` extend `chat`, `notifications` and `any`. Producers can be independent Muse workers, while `actor` remains the verified CrewQuay platform identity. Stage cannot grant permissions. Project business writes require default-deny `allowed_project_action_ids`, and state-changing actions also require explicit `allowed_task_actions`. Target task/Room IDs are resolved through authenticated GETs before resource-scoped writes. Remote business rules remain authoritative.
 
-Replies and task actions are confirmed only with exact server identity, content, revision and/or digest evidence. A crashed or ambiguous POST remains `unknown`; never guess from a similar summary or duplicate text.
+Replies and task actions are confirmed only with exact server identity, content, revision and/or digest evidence. A crashed or ambiguous POST remains `unknown`; never guess from a similar summary or duplicate text (see the narrow chat readback rule below).
+
+## Issue #69: closing `unknown`
+
+A sender raises `NotDispatched` only when no network write was attempted (failed pre-POST authorization re-check, transport budget/stop/validation errors). Such an attempt returns to `retry_wait` with the same immutable request and idempotency key instead of becoming `unknown`. Every other failure (HTTP status 0, 5xx, mid-flight exceptions such as `IncompleteRead`) stays `unknown` / `ambiguous remote result`.
+
+An `unknown` chat `send` without `remote_id` is reconciled read-only, never re-POSTed:
+
+- **confirmed** only if a complete, all-200 readback finds exactly one message with the exact actor and content, `createdAt` after staging (minus skew), whose ID no other Outbox row owns; the ownership check is repeated atomically when confirming;
+- **back to `prepared`** (`proven_absent` evidence stored in `result`) only if that complete readback finds no such message, `dispatch_at` is set, and the lease window has elapsed since dispatch; the next attempt reuses the same idempotency key;
+- otherwise (multiple candidates, unparsable `createdAt`, page error, page bound reached, another unresolved row with the same actor/target/payload) it stays `unknown`.
+
+`unknown` collaboration, task and platform actions without a remote ID are not auto-closed by this rule; they still need exact remote identity or an operator `resolve`.
 
 ## Phase 5 platform lane
 
